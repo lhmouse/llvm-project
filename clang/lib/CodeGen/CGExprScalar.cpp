@@ -999,6 +999,8 @@ public:
   Value *VisitBin##CODE(const BinaryOperator *E) {                             \
     if (CGF.getTarget().hasSoftX87LongDouble() &&                              \
         E->getLHS()->getType()->isSpecificBuiltinType(                         \
+            BuiltinType::LongDouble) &&                                        \
+        E->getRHS()->getType()->isSpecificBuiltinType(                         \
             BuiltinType::LongDouble))                                          \
       return EmitSoftX87Compare(E, llvm::FCmpInst::FP);                        \
     return EmitCompare(E, llvm::ICmpInst::UI, llvm::ICmpInst::SI,              \
@@ -1672,11 +1674,13 @@ Value *ScalarExprEmitter::EmitSoftX87BinOp(
 Value *ScalarExprEmitter::EmitSoftX87Compare(const BinaryOperator *E,
                                              llvm::CmpInst::Predicate FCmpOpc) {
   SourceLocation Loc = E->getExprLoc();
-  llvm::Value *LHS =
-      CGF.EmitSoftX87LdToDouble(CGF.EmitScalarExpr(E->getLHS()), Loc);
-  llvm::Value *RHS =
-      CGF.EmitSoftX87LdToDouble(CGF.EmitScalarExpr(E->getRHS()), Loc);
-  llvm::Value *Result = Builder.CreateFCmp(FCmpOpc, LHS, RHS, "cmp");
+  llvm::Value *LHS = CGF.EmitScalarExpr(E->getLHS());
+  llvm::Value *RHS = CGF.EmitScalarExpr(E->getRHS());
+  // The comparison is carried out on the 80-bit images themselves: narrowing
+  // the operands to `double` first would make distinct values compare equal
+  // (everything below the smallest `double` becomes zero, and values that only
+  // differ in the low significand bits collapse into one).
+  llvm::Value *Result = CGF.EmitSoftX87LdCompare(LHS, RHS, FCmpOpc);
   return EmitScalarConversion(Result, CGF.getContext().BoolTy, E->getType(),
                               Loc);
 }
@@ -1698,6 +1702,10 @@ Value *ScalarExprEmitter::EmitScalarConversion(Value *Src, QualType SrcType,
         CDstType->isSpecificBuiltinType(BuiltinType::LongDouble);
     if (CSrcType != CDstType && (SrcIsLd || DstIsLd)) {
       QualType DoubleTy = CGF.getContext().DoubleTy;
+      // Converting to `bool` must not go through `double`, or a value below
+      // the `double` range would be tested as zero.
+      if (SrcIsLd && CDstType->isBooleanType())
+        return EmitConversionToBool(Src, CSrcType);
       if (SrcIsLd) {
         Src = CGF.EmitSoftX87LdToDouble(Src, Loc);
         SrcType = DoubleTy;
@@ -5535,15 +5543,10 @@ Value *ScalarExprEmitter::EmitCompare(const BinaryOperator *E,
       ResultR = Builder.CreateFCmp(FCmpOpc, LHS.first, RHS.first, "cmp.r");
       ResultI = Builder.CreateFCmp(FCmpOpc, LHS.second, RHS.second, "cmp.i");
     } else if (CETy->isRealFloatingType()) {
-      // ARM64EC: the element is an x87 image held in an integer, so compare
-      // the components through `double` instead of with an integer predicate.
-      SourceLocation Loc = E->getExprLoc();
-      ResultR = Builder.CreateFCmp(
-          FCmpOpc, CGF.EmitSoftX87LdToDouble(LHS.first, Loc),
-          CGF.EmitSoftX87LdToDouble(RHS.first, Loc), "cmp.r");
-      ResultI = Builder.CreateFCmp(
-          FCmpOpc, CGF.EmitSoftX87LdToDouble(LHS.second, Loc),
-          CGF.EmitSoftX87LdToDouble(RHS.second, Loc), "cmp.i");
+      // ARM64EC: the element is an x87 image held in an integer, so the
+      // components are compared exactly, on the images themselves.
+      ResultR = CGF.EmitSoftX87LdCompare(LHS.first, RHS.first, FCmpOpc);
+      ResultI = CGF.EmitSoftX87LdCompare(LHS.second, RHS.second, FCmpOpc);
     } else {
       // Complex comparisons can only be equality comparisons.  As such, signed
       // and unsigned opcodes are the same.
@@ -6384,6 +6387,101 @@ llvm::Value *CodeGenFunction::EmitDoubleToSoftX87Ld(llvm::Value *Value,
       CGM.CreateRuntimeFunction(FT, "__arm64ec_store_x87_long_double");
   Builder.CreateCall(Fn, {Tmp.getPointerIfNotSigned(), Value});
   return Builder.CreateLoad(Tmp, "double.to.x87ld");
+}
+
+/// Test a software x87 image, already truncated to its 80 significant bits,
+/// for NaN.  In this format a NaN has the all-ones exponent and a significand
+/// other than the one of infinity, which is exactly 0x8000000000000000 because
+/// the integer bit is explicit.  The pseudo-encodings whose integer bit is
+/// clear have no finite value either and are treated as NaN, consistently with
+/// the other predicates below.
+static llvm::Value *softX87IsNaN(llvm::IRBuilderBase &Builder,
+                                 llvm::Type *I80Ty,
+                                 llvm::Value *V) {
+  llvm::Constant *ExpAllOnes = llvm::ConstantInt::get(I80Ty, 0x7FFF);
+  llvm::Value *Exp = Builder.CreateAnd(Builder.CreateLShr(V, 64), ExpAllOnes);
+  llvm::Value *Man = Builder.CreateAnd(
+      V, llvm::ConstantInt::get(I80Ty, 0xFFFFFFFFFFFFFFFFULL));
+  return Builder.CreateAnd(
+      Builder.CreateICmpEQ(Exp, ExpAllOnes),
+      Builder.CreateICmpNE(
+          Man, llvm::ConstantInt::get(I80Ty, 0x8000000000000000ULL)));
+}
+
+llvm::Value *CodeGenFunction::EmitSoftX87LdIsNaN(llvm::Value *Bits) {
+  llvm::Type *I80Ty = llvm::IntegerType::get(getLLVMContext(), 80);
+  return softX87IsNaN(Builder, I80Ty, Builder.CreateTrunc(Bits, I80Ty));
+}
+
+llvm::Value *CodeGenFunction::EmitSoftX87LdCompare(
+    llvm::Value *LHS, llvm::Value *RHS, llvm::CmpInst::Predicate Pred) {
+  llvm::Type *I80Ty = llvm::IntegerType::get(getLLVMContext(), 80);
+  // The six padding bytes above the image must not take part in the
+  // comparison, so only the 80 significant bits are considered.
+  llvm::Value *L = Builder.CreateTrunc(LHS, I80Ty);
+  llvm::Value *R = Builder.CreateTrunc(RHS, I80Ty);
+
+  llvm::Constant *Zero = llvm::ConstantInt::get(I80Ty, 0);
+  llvm::Constant *SignMask =
+      llvm::ConstantInt::get(I80Ty, llvm::APInt::getOneBitSet(80, 79));
+  llvm::Constant *MagnitudeMask =
+      llvm::ConstantInt::get(I80Ty, ~llvm::APInt::getOneBitSet(80, 79));
+  llvm::Constant *ExpMask = llvm::ConstantInt::get(I80Ty, 0x7FFF);
+  llvm::Constant *MantMask =
+      llvm::ConstantInt::get(I80Ty, 0xFFFFFFFFFFFFFFFFULL);
+
+  // Map an image onto an integer whose unsigned order is the numeric order of
+  // the value it denotes.  This is the usual sign-magnitude trick, with the
+  // two zeroes folded together so that -0.0 and +0.0 compare equal.
+  auto Key = [&](llvm::Value *V) -> llvm::Value * {
+    llvm::Value *Exp = Builder.CreateAnd(Builder.CreateLShr(V, 64), ExpMask);
+    llvm::Value *Man = Builder.CreateAnd(V, MantMask);
+    llvm::Value *IsZero = Builder.CreateAnd(Builder.CreateICmpEQ(Exp, Zero),
+                                            Builder.CreateICmpEQ(Man, Zero));
+    llvm::Value *Canon =
+        Builder.CreateSelect(IsZero, Builder.CreateAnd(V, MagnitudeMask), V);
+    llvm::Value *Negative =
+        Builder.CreateICmpNE(Builder.CreateAnd(Canon, SignMask), Zero);
+    return Builder.CreateSelect(Negative, Builder.CreateNot(Canon),
+                                Builder.CreateOr(Canon, SignMask));
+  };
+  llvm::Value *KL = Key(L);
+  llvm::Value *KR = Key(R);
+
+  llvm::Value *Ordered = Builder.CreateAnd(
+      Builder.CreateNot(softX87IsNaN(Builder, I80Ty, L)),
+      Builder.CreateNot(softX87IsNaN(Builder, I80Ty, R)));
+
+  llvm::CmpInst::Predicate IP;
+  bool UnorderedIsTrue = false;
+  switch (Pred) {
+  case llvm::CmpInst::FCMP_OLT:
+    IP = llvm::CmpInst::ICMP_ULT;
+    break;
+  case llvm::CmpInst::FCMP_OGT:
+    IP = llvm::CmpInst::ICMP_UGT;
+    break;
+  case llvm::CmpInst::FCMP_OLE:
+    IP = llvm::CmpInst::ICMP_ULE;
+    break;
+  case llvm::CmpInst::FCMP_OGE:
+    IP = llvm::CmpInst::ICMP_UGE;
+    break;
+  case llvm::CmpInst::FCMP_OEQ:
+    IP = llvm::CmpInst::ICMP_EQ;
+    break;
+  case llvm::CmpInst::FCMP_UNE:
+    IP = llvm::CmpInst::ICMP_NE;
+    UnorderedIsTrue = true;
+    break;
+  default:
+    llvm_unreachable("unsupported comparison predicate for soft x87");
+  }
+
+  llvm::Value *Cmp = Builder.CreateICmp(IP, KL, KR, "x87cmp");
+  if (UnorderedIsTrue)
+    return Builder.CreateOr(Cmp, Builder.CreateNot(Ordered), "x87cmp.ne");
+  return Builder.CreateAnd(Cmp, Ordered, "x87cmp.ord");
 }
 
 Value *

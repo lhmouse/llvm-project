@@ -1424,7 +1424,21 @@ EmitComplexPrePostIncDec(const UnaryOperator *E, LValue LV,
   ComplexPairTy InVal = EmitLoadOfComplex(LV, E->getExprLoc());
 
   llvm::Value *NextVal;
-  if (isa<llvm::IntegerType>(InVal.first->getType())) {
+  // ARM64EC: the real component of a software x87 `long double` is an integer
+  // image, so the increment has to be applied to the value it denotes rather
+  // than to the image itself.
+  if (getTarget().hasSoftX87LongDouble() &&
+      E->getType()
+          ->castAs<ComplexType>()
+          ->getElementType()
+          ->isSpecificBuiltinType(BuiltinType::LongDouble)) {
+    SourceLocation Loc = E->getExprLoc();
+    llvm::Value *Real = EmitSoftX87LdToDouble(InVal.first, Loc);
+    llvm::Value *Amount = llvm::ConstantFP::get(
+        llvm::Type::getDoubleTy(getLLVMContext()), isInc ? 1.0 : -1.0);
+    NextVal = EmitDoubleToSoftX87Ld(
+        Builder.CreateFAdd(Real, Amount, isInc ? "inc" : "dec"), Loc);
+  } else if (isa<llvm::IntegerType>(InVal.first->getType())) {
     uint64_t AmountVal = isInc ? 1 : -1;
     NextVal = llvm::ConstantInt::get(InVal.first->getType(), AmountVal, true);
 

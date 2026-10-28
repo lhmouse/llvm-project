@@ -2714,6 +2714,14 @@ static void ClearPadding(CodeGenFunction &CGF, Address Src,
   }
 }
 
+/// Report whether \p Ty is a `long double _Complex`, whose LLVM components are
+/// software x87 images on this target.
+static bool isSoftX87ComplexLongDouble(QualType Ty) {
+  const auto *CTy = Ty->getAs<ComplexType>();
+  return CTy && CTy->getElementType()->isSpecificBuiltinType(
+                    BuiltinType::LongDouble);
+}
+
 /// Lower builtins that operate on ARM64EC's software x87 `long double`.  The
 /// ones that are required to be exact (fabs, copysign, signbit, isnan, isinf,
 /// isfinite, isnormal, fpclassify) are implemented with integer operations on
@@ -2735,7 +2743,8 @@ bool CodeGenFunction::EmitSoftX87LongDoubleBuiltin(unsigned BuiltinID,
   bool ConsumesLongDouble = false;
   for (const Expr *Arg : E->arguments())
     ConsumesLongDouble |=
-        Arg->getType()->isSpecificBuiltinType(BuiltinType::LongDouble);
+        Arg->getType()->isSpecificBuiltinType(BuiltinType::LongDouble) ||
+        isSoftX87ComplexLongDouble(Arg->getType());
   // The 'nan' and 'inf' families take a string or no argument at all and still
   // produce a `long double`, so they do not consume one but do need the integer
   // image constructed below: they are the only builtins that yield a constant.
@@ -2809,7 +2818,8 @@ bool CodeGenFunction::EmitSoftX87LongDoubleBuiltin(unsigned BuiltinID,
     return true;
   }
 
-  if (Name == "__builtin_signbit") {
+  if (Name == "__builtin_signbit" || Name == "signbitl" ||
+      Name == "__builtin_signbitl") {
     if (!E->getArg(0)->getType()->isSpecificBuiltinType(
             BuiltinType::LongDouble))
       return false;
@@ -2902,19 +2912,15 @@ bool CodeGenFunction::EmitSoftX87LongDoubleBuiltin(unsigned BuiltinID,
         Builder.CreateICmpEQ(Exp, Builder.getInt16(0x7FFF));
     llvm::Value *ExpZero = Builder.CreateICmpEQ(Exp, Builder.getInt16(0));
     llvm::Value *ManZero = Builder.CreateICmpEQ(Man, Builder.getInt64(0));
-    llvm::Value *IntBitZero =
-        Builder.CreateICmpEQ(Builder.CreateLShr(Man, 63), Builder.getInt64(0));
-    llvm::Value *IsNaN = Builder.CreateOr(
-        Builder.CreateAnd(ExpAllOnes, Builder.CreateNot(ManZero)),
-        Builder.CreateAnd(
-            Builder.CreateNot(ExpAllOnes),
-            Builder.CreateAnd(Builder.CreateNot(ExpZero), IntBitZero)));
-    llvm::Value *IsInf = Builder.CreateAnd(ExpAllOnes, ManZero);
+    // Note that these two must agree with `__builtin_isinf` and
+    // `__builtin_isnan` above: infinity has an explicit integer bit, so its
+    // significand is 0x8000000000000000 rather than zero.
+    llvm::Value *IsInf = IsInfImage(V);
+    llvm::Value *IsNaN = IsNaNAllOnes(V);
     llvm::Value *IsZero = Builder.CreateAnd(ExpZero, ManZero);
-    llvm::Value *IsSub = Builder.CreateAnd(
-        ExpZero, Builder.CreateAnd(Builder.CreateNot(ManZero), IntBitZero));
-    llvm::Value *IsNormal = Builder.CreateNot(Builder.CreateOr(
-        IsNaN, Builder.CreateOr(IsInf, Builder.CreateOr(IsZero, IsSub))));
+    llvm::Value *IsSub = Builder.CreateAnd(ExpZero, Builder.CreateNot(ManZero));
+    llvm::Value *IsNormal = Builder.CreateAnd(Builder.CreateNot(ExpZero),
+                                              Builder.CreateNot(ExpAllOnes));
     llvm::Value *A0 = EmitScalarExpr(E->getArg(0));
     llvm::Value *A1 = EmitScalarExpr(E->getArg(1));
     llvm::Value *A2 = EmitScalarExpr(E->getArg(2));
@@ -2943,12 +2949,112 @@ bool CodeGenFunction::EmitSoftX87LongDoubleBuiltin(unsigned BuiltinID,
       Name == "__builtin_nansl") {
     // The quiet NaN has significand 0xC000000000000000 and the signalling one
     // has 0xA000000000000000, both with sign/exponent 0x7FFF; the payload of
-    // the tag argument is not propagated.
+    // the tag argument is not propagated.  The argument is nevertheless
+    // evaluated, because it may have side effects.
+    EmitScalarExpr(E->getArg(0));
     const bool Signalling = Name == "nansl" || Name == "__builtin_nansl";
     llvm::APInt Image(128, Signalling ? 0xa000000000000000ull
                                       : 0xc000000000000000ull);
     Image |= llvm::APInt(128, 0x7fffu) << 64;
     Result = RValue::get(llvm::ConstantInt::get(I128Ty, Image));
+    return true;
+  }
+
+  // The comparison predicates are "custom type checking" builtins: their
+  // operands are not promoted to the types of the prototype, and most of them
+  // are not C library functions either (`islessequal` has no entry point at
+  // all).  They are lowered here, exactly, on the integer images.
+  {
+    llvm::CmpInst::Predicate Pred = llvm::CmpInst::BAD_ICMP_PREDICATE;
+    const bool IsUnordered = Name == "__builtin_isunordered";
+    if (Name == "__builtin_isgreater")
+      Pred = llvm::CmpInst::FCMP_OGT;
+    else if (Name == "__builtin_isgreaterequal")
+      Pred = llvm::CmpInst::FCMP_OGE;
+    else if (Name == "__builtin_isless")
+      Pred = llvm::CmpInst::FCMP_OLT;
+    else if (Name == "__builtin_islessequal")
+      Pred = llvm::CmpInst::FCMP_OLE;
+    else if (Name == "__builtin_islessgreater")
+      Pred = llvm::CmpInst::FCMP_UNE;
+    if ((IsUnordered || Pred != llvm::CmpInst::BAD_ICMP_PREDICATE) &&
+        E->getNumArgs() == 2) {
+      auto ToLongDouble = [&](const Expr *Arg) -> llvm::Value * {
+        llvm::Value *V = EmitScalarExpr(Arg);
+        if (!Arg->getType()->isSpecificBuiltinType(BuiltinType::LongDouble))
+          V = EmitScalarConversion(V, Arg->getType(), Ctx.LongDoubleTy, Loc);
+        return V;
+      };
+      llvm::Value *A = ToLongDouble(E->getArg(0));
+      llvm::Value *B = ToLongDouble(E->getArg(1));
+      llvm::Value *Cmp =
+          IsUnordered ? Builder.CreateOr(EmitSoftX87LdIsNaN(A),
+                                         EmitSoftX87LdIsNaN(B))
+                      : EmitSoftX87LdCompare(A, B, Pred);
+      Result =
+          RValue::get(Builder.CreateZExt(Cmp, ConvertType(E->getType())));
+      return true;
+    }
+  }
+
+  // `__builtin_isfpclass` is not a library function and its second argument is
+  // a constant mask, so it cannot go through the rewrite below either.
+  if (Name == "__builtin_isfpclass" && E->getNumArgs() == 2 &&
+      E->getArg(0)->getType()->isSpecificBuiltinType(
+          BuiltinType::LongDouble)) {
+    Expr::EvalResult MaskResult;
+    if (!E->getArg(1)->EvaluateAsInt(MaskResult, Ctx))
+      return false;
+    const uint64_t Mask = MaskResult.Val.getInt().getLimitedValue();
+    llvm::Value *V = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Exp = ExpField(V);
+    llvm::Value *Man = MantissaOf(V);
+    llvm::Value *Negative =
+        Builder.CreateICmpNE(SignBitOf(V), Builder.getInt32(0));
+    llvm::Value *Positive = Builder.CreateNot(Negative);
+    llvm::Value *ExpZero = Builder.CreateICmpEQ(Exp, Builder.getInt16(0));
+    llvm::Value *ExpAllOnes =
+        Builder.CreateICmpEQ(Exp, Builder.getInt16(0x7FFF));
+    llvm::Value *ManZero = Builder.CreateICmpEQ(Man, Builder.getInt64(0));
+    llvm::Value *IsInf = IsInfImage(V);
+    llvm::Value *IsNaN = IsNaNAllOnes(V);
+    // An x87 significand keeps the binary64 quiet bit at bit 62.
+    llvm::Value *Quiet = Builder.CreateICmpNE(
+        Builder.CreateAnd(Builder.CreateLShr(Man, 62), Builder.getInt64(1)),
+        Builder.getInt64(0));
+    llvm::Value *IsZero = Builder.CreateAnd(ExpZero, ManZero);
+    llvm::Value *IsSub = Builder.CreateAnd(ExpZero, Builder.CreateNot(ManZero));
+    llvm::Value *IsNormal = Builder.CreateAnd(Builder.CreateNot(ExpZero),
+                                              Builder.CreateNot(ExpAllOnes));
+    llvm::Value *Bits = Builder.getInt32(0);
+    auto AddClass = [&](llvm::Value *Cond, uint32_t Bit) {
+      Bits = Builder.CreateOr(
+          Bits, Builder.CreateSelect(Cond, Builder.getInt32(Bit),
+                                     Builder.getInt32(0)));
+    };
+    AddClass(Builder.CreateAnd(IsNaN, Quiet), 0x0002);          // fcQNan
+    AddClass(Builder.CreateAnd(IsNaN, Builder.CreateNot(Quiet)),
+             0x0001);                                          // fcSNan
+    AddClass(Builder.CreateAnd(IsInf, Negative), 0x0004);             // fcNegInf
+    AddClass(Builder.CreateAnd(IsNormal, Negative), 0x0008);          // fcNegNormal
+    AddClass(Builder.CreateAnd(IsSub, Negative), 0x0010);             // fcNegSubnormal
+    AddClass(Builder.CreateAnd(IsZero, Negative), 0x0020);            // fcNegZero
+    AddClass(Builder.CreateAnd(IsZero, Positive), 0x0040);       // fcPosZero
+    AddClass(Builder.CreateAnd(IsSub, Positive), 0x0080);        // fcPosSubnormal
+    AddClass(Builder.CreateAnd(IsNormal, Positive), 0x0100);     // fcPosNormal
+    AddClass(Builder.CreateAnd(IsInf, Positive), 0x0200);        // fcPosInf
+    llvm::Value *Sel = Builder.CreateAnd(Bits, Builder.getInt32(Mask));
+    Result = RValue::get(Builder.CreateZExt(
+        Builder.CreateICmpNE(Sel, Builder.getInt32(0)),
+        ConvertType(E->getType())));
+    return true;
+  }
+
+  // `__builtin_complex` assembles a complex value out of two reals and has no
+  // library counterpart at all.
+  if (Name == "__builtin_complex") {
+    Result = RValue::getComplex(EmitScalarExpr(E->getArg(0)),
+                                EmitScalarExpr(E->getArg(1)));
     return true;
   }
 
@@ -2979,12 +3085,106 @@ bool CodeGenFunction::EmitSoftX87LongDoubleBuiltin(unsigned BuiltinID,
   if (StringRef(LibName).starts_with(BuiltinPrefix))
     LibName.erase(0, BuiltinPrefix.size());
 
+  // A few functions have no C library entry point under the spelling that
+  // would result from stripping the prefix and the trailing 'l', or they have
+  // to act on the image itself.
+  if (LibName == "powil") {
+    // There is no `powi` in the C library, only the `llvm.powi` intrinsic.
+    llvm::Value *X = EmitSoftX87LdToDouble(EmitScalarExpr(E->getArg(0)), Loc);
+    llvm::Value *N = EmitScalarExpr(E->getArg(1));
+    llvm::Value *R = Builder.CreateCall(
+        CGM.getIntrinsic(llvm::Intrinsic::powi,
+                         {Builder.getDoubleTy(), N->getType()}),
+        {X, N}, "powi");
+    Result = RValue::get(EmitDoubleToSoftX87Ld(R, Loc));
+    return true;
+  }
+
+  if (LibName == "ilogbl") {
+    // ucrtbase only provides the binary64 `ilogbl`, which sees an infinity as
+    // soon as the value overflows `double` and therefore reports `INT_MAX`
+    // instead of the exponent.  The exponent comes straight out of the image.
+    llvm::Value *V = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Exp = ExpField(V);
+    llvm::Value *Man = MantissaOf(V);
+    llvm::Value *ExpZero = Builder.CreateICmpEQ(Exp, Builder.getInt16(0));
+    llvm::Value *ExpAllOnes =
+        Builder.CreateICmpEQ(Exp, Builder.getInt16(0x7FFF));
+    llvm::Value *IsZero = Builder.CreateAnd(
+        ExpZero, Builder.CreateICmpEQ(Man, Builder.getInt64(0)));
+    // For a normal value the biased exponent *is* the result.
+    llvm::Value *Normal = Builder.CreateSub(
+        Builder.CreateSExt(Exp, I32Ty), Builder.getInt32(16383), "ilogb.n");
+    // A subnormal is `significand * 2^-16445`, so the position of its highest
+    // set bit gives the result: `-16382 - clz(significand)`.
+    llvm::Value *Clz =
+        Builder.CreateCall(CGM.getIntrinsic(llvm::Intrinsic::ctlz, {I64Ty}),
+                           {Man, Builder.getFalse()}, "ilogb.clz");
+    llvm::Value *Subnormal =
+        Builder.CreateSub(Builder.getInt32(-16382),
+                          Builder.CreateTrunc(Clz, I32Ty), "ilogb.s");
+    llvm::Value *R = Builder.CreateSelect(ExpZero, Subnormal, Normal);
+    // Infinity gives INT_MAX and a NaN gives FP_ILOGBNAN, which is INT_MAX as
+    // well on this target; zero gives FP_ILOGB0, which is INT_MIN.
+    R = Builder.CreateSelect(ExpAllOnes, Builder.getInt32(2147483647), R);
+    R = Builder.CreateSelect(IsZero, Builder.getInt32(-2147483647 - 1), R);
+    Result = RValue::get(R);
+    return true;
+  }
+
+  if (LibName == "sincosl") {
+    // The output pointers of the `long double` spelling refer to 16-byte x87
+    // slots, but the binary64 entry point writes a `double` through each of
+    // them.  Compute into temporaries and convert both results back.
+    llvm::Value *X = EmitSoftX87LdToDouble(EmitScalarExpr(E->getArg(0)), Loc);
+    llvm::Value *SOut = EmitScalarExpr(E->getArg(1));
+    llvm::Value *COut = EmitScalarExpr(E->getArg(2));
+    llvm::Type *DblTy = Builder.getDoubleTy();
+    Address STmp(CreateTempAlloca(DblTy, CharUnits::fromQuantity(8),
+                                  "sincos.s"));
+    Address CTmp(CreateTempAlloca(DblTy, CharUnits::fromQuantity(8),
+                                  "sincos.c"));
+    llvm::FunctionType *FT =
+        llvm::FunctionType::get(Builder.getVoidTy(),
+                                {DblTy, Builder.getPtrTy(), Builder.getPtrTy()},
+                                false);
+    llvm::FunctionCallee Fn = CGM.CreateRuntimeFunction(FT, "sincos");
+    Builder.CreateCall(Fn, {X, STmp.getPointerIfNotSigned(),
+                            CTmp.getPointerIfNotSigned()});
+    llvm::Value *S = Builder.CreateLoad(STmp, "sincos.s.v");
+    llvm::Value *C = Builder.CreateLoad(CTmp, "sincos.c.v");
+    CharUnits LDAlign = Ctx.getTypeAlignInChars(Ctx.LongDoubleTy);
+    Address SAddr(SOut, I128Ty, LDAlign);
+    Address CAddr(COut, I128Ty, LDAlign);
+    Builder.CreateStore(EmitDoubleToSoftX87Ld(S, Loc), SAddr);
+    Builder.CreateStore(EmitDoubleToSoftX87Ld(C, Loc), CAddr);
+    return true;
+  }
+
+  if (LibName == "conjl") {
+    // Conjugation only flips the sign bit of the imaginary component, which is
+    // exact on the image; the rewrite below would pass integer components to
+    // `conj` instead.
+    ComplexPairTy Z = EmitComplexExpr(E->getArg(0));
+    llvm::Constant *ConjSignMask =
+        llvm::ConstantInt::get(I128Ty, llvm::APInt::getOneBitSet(128, 79));
+    Result = RValue::getComplex(
+        Z.first, Builder.CreateXor(Z.second, ConjSignMask, "conj.i"));
+    return true;
+  }
+
   const bool Exact = LibName == "frexpl" || LibName == "ldexpl" ||
                      LibName == "modfl" || LibName == "nextafterl" ||
                      LibName == "nexttowardl" || LibName == "nexttoward" ||
                      LibName == "nexttowardf";
   if (!Exact && LibName.size() > 1 && LibName.back() == 'l')
     LibName.pop_back();
+
+  // The rewrite below produces a scalar call, so a builtin that yields a
+  // complex value cannot use it; those either have their own lowering above or
+  // fall through to the ordinary path.
+  if (E->getType()->isAnyComplexType())
+    return false;
 
   SmallVector<llvm::Type *, 4> ArgTys;
   SmallVector<llvm::Value *, 4> Args;
@@ -3029,10 +3229,12 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
       DirectCallee && DirectCallee->getDeclContext()->isNamespace();
   if (getTarget().hasSoftX87LongDouble() && !IsCxxLibBuiltin) {
     bool TouchesLongDouble =
-        E->getType()->isSpecificBuiltinType(BuiltinType::LongDouble);
+        E->getType()->isSpecificBuiltinType(BuiltinType::LongDouble) ||
+        isSoftX87ComplexLongDouble(E->getType());
     for (const Expr *Arg : E->arguments())
       TouchesLongDouble |=
-          Arg->getType()->isSpecificBuiltinType(BuiltinType::LongDouble);
+          Arg->getType()->isSpecificBuiltinType(BuiltinType::LongDouble) ||
+          isSoftX87ComplexLongDouble(Arg->getType());
     if (TouchesLongDouble) {
       RValue X87Result;
       if (EmitSoftX87LongDoubleBuiltin(BuiltinID, E, ReturnValue, X87Result))

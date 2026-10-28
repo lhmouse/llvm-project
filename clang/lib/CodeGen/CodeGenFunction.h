@@ -5227,6 +5227,18 @@ public:
   llvm::Value *EmitSoftX87LdToDouble(llvm::Value *Bits, SourceLocation Loc);
   llvm::Value *EmitDoubleToSoftX87Ld(llvm::Value *Value, SourceLocation Loc);
 
+  /// Test whether a software x87 `long double` image is a NaN.  The test is
+  /// carried out on the image itself and therefore stays exact.
+  llvm::Value *EmitSoftX87LdIsNaN(llvm::Value *Bits);
+
+  /// Compare two software x87 `long double` images against \p Pred (one of
+  /// the floating-point predicates `FCMP_OLT`, `FCMP_OGT`, `FCMP_OLE`,
+  /// `FCMP_OGE`, `FCMP_OEQ` and `FCMP_UNE`) without narrowing either of them
+  /// to `double`.  NaN operands compare unordered, exactly as they do for the
+  /// hardware format.
+  llvm::Value *EmitSoftX87LdCompare(llvm::Value *LHS, llvm::Value *RHS,
+                                    llvm::CmpInst::Predicate Pred);
+
   /// Emit a conversion from the specified complex type to the specified
   /// destination type, where the destination type is an LLVM scalar type.
   llvm::Value *EmitComplexToScalarConversion(ComplexPairTy Src, QualType SrcTy,

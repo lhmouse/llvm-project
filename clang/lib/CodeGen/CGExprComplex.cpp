@@ -281,10 +281,30 @@ public:
   /// 128-bit integer, so `long double _Complex` would otherwise be emitted as
   /// *integer* complex arithmetic, which neither implements x87 semantics nor
   /// even accepts a real operand next to a complex one.  Report whether `Op`
-  /// is such an operation.
+  /// is such an operation.  Note that the LLVM component type alone cannot be
+  /// used for this: `_Complex int` is an integer type as well, and it must
+  /// keep integer arithmetic.
   bool isSoftX87ComplexOp(const BinOpInfo &Op) const {
-    return CGF.getTarget().hasSoftX87LongDouble() &&
-           !Op.LHS.first->getType()->isFloatingPointTy();
+    if (!CGF.getTarget().hasSoftX87LongDouble() ||
+        Op.LHS.first->getType()->isFloatingPointTy())
+      return false;
+    const auto *CTy = Op.Ty->getAs<ComplexType>();
+    return CTy && CTy->getElementType()->isSpecificBuiltinType(
+                      BuiltinType::LongDouble);
+  }
+  /// Report whether \p Ty is a `long double _Complex` in the software x87
+  /// format, i.e. whether its LLVM components are integer images.
+  bool isSoftX87ComplexType(QualType Ty) const {
+    if (!CGF.getTarget().hasSoftX87LongDouble())
+      return false;
+    const auto *CTy = Ty->getAs<ComplexType>();
+    return CTy && CTy->getElementType()->isSpecificBuiltinType(
+                      BuiltinType::LongDouble);
+  }
+  /// The mask that flips the sign bit of a software x87 image.
+  llvm::Constant *softX87SignMask() const {
+    return llvm::ConstantInt::get(CGF.getLLVMContext(),
+                                  llvm::APInt::getOneBitSet(128, 79));
   }
   /// Rewrite the components of a soft-x87 `BinOpInfo` as `double`.
   BinOpInfo softX87ComplexToDouble(const BinOpInfo &Op);
@@ -708,16 +728,13 @@ ComplexPairTy ComplexExprEmitter::VisitMinus(const UnaryOperator *E,
   if (Op.first->getType()->isFloatingPointTy()) {
     ResR = Builder.CreateFNeg(Op.first, "neg.r");
     ResI = Builder.CreateFNeg(Op.second, "neg.i");
-  } else if (CGF.getTarget().hasSoftX87LongDouble()) {
-    // ARM64EC: the components are x87 images held in integers, so negate them
-    // through `double` rather than with a two's complement negation.
-    SourceLocation Loc;
-    ResR = CGF.EmitDoubleToSoftX87Ld(
-        Builder.CreateFNeg(CGF.EmitSoftX87LdToDouble(Op.first, Loc), "neg.r"),
-        Loc);
-    ResI = CGF.EmitDoubleToSoftX87Ld(
-        Builder.CreateFNeg(CGF.EmitSoftX87LdToDouble(Op.second, Loc), "neg.i"),
-        Loc);
+  } else if (isSoftX87ComplexType(E->getType())) {
+    // ARM64EC: the components are x87 images held in integers, so flipping
+    // their sign bits is both exact and cheap; a round trip through `double`
+    // would turn a value such as 0x1p2000L into an infinity.
+    llvm::Constant *Mask = softX87SignMask();
+    ResR = Builder.CreateXor(Op.first, Mask, "neg.r");
+    ResI = Builder.CreateXor(Op.second, Mask, "neg.i");
   } else {
     ResR = Builder.CreateNeg(Op.first, "neg.r");
     ResI = Builder.CreateNeg(Op.second, "neg.i");
@@ -733,12 +750,9 @@ ComplexPairTy ComplexExprEmitter::VisitUnaryNot(const UnaryOperator *E) {
   llvm::Value *ResI;
   if (Op.second->getType()->isFloatingPointTy())
     ResI = Builder.CreateFNeg(Op.second, "conj.i");
-  else if (CGF.getTarget().hasSoftX87LongDouble()) {
-    // ARM64EC: flip the sign bit of the imaginary part by way of `double`.
-    SourceLocation Loc;
-    ResI = CGF.EmitDoubleToSoftX87Ld(
-        Builder.CreateFNeg(CGF.EmitSoftX87LdToDouble(Op.second, Loc), "conj.i"),
-        Loc);
+  else if (isSoftX87ComplexType(E->getType())) {
+    // ARM64EC: conjugate by flipping the sign bit of the x87 image itself.
+    ResI = Builder.CreateXor(Op.second, softX87SignMask(), "conj.i");
   } else
     ResI = Builder.CreateNeg(Op.second, "conj.i");
 
