@@ -214,6 +214,10 @@ public:
   bool shouldReduceLoadWidth(SDNode *Load, ISD::LoadExtType ExtTy, EVT NewVT,
                              std::optional<unsigned> ByteOffset) const override;
 
+  bool shouldSoftenFloatMemoryOpToTransformType(EVT VT) const override;
+
+  unsigned getSoftenedFloatSignBit(EVT VT, EVT NVT) const override;
+
   bool shouldRemoveRedundantExtend(SDValue Op) const override;
 
   bool isTruncateFree(Type *Ty1, Type *Ty2) const override;

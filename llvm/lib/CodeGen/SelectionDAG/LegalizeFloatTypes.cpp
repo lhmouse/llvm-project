@@ -251,7 +251,16 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_Binary(SDNode *N, RTLIB::Libcall LC) {
 }
 
 SDValue DAGTypeLegalizer::SoftenFloatRes_BITCAST(SDNode *N) {
-  return BitConvertToInteger(N->getOperand(0));
+  EVT VT = N->getValueType(0);
+  EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), VT);
+  SDValue Op = BitConvertToInteger(N->getOperand(0));
+  // The operand has the same size as the floating-point value, which may be
+  // narrower than the type the value is softened to: an 80-bit x86_fp80, for
+  // instance, is softened to a 16-byte image.  The bits that the widening
+  // exposes are padding and are not part of the value.
+  if (Op.getValueType() != NVT)
+    Op = DAG.getZExtOrTrunc(Op, SDLoc(N), NVT);
+  return Op;
 }
 
 SDValue DAGTypeLegalizer::SoftenFloatRes_FREEZE(SDNode *N) {
@@ -291,18 +300,20 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_ConstantFP(SDNode *N) {
   // so on big-Endian targets, the two doubles are output in the wrong
   // order. Fix this by manually flipping the order of the high 64 bits
   // and the low 64 bits here.
+  EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), CN->getValueType(0));
+  APInt Val = CN->getValueAPF().bitcastToAPInt();
+  // The transform type may be wider than the floating-point type, such as
+  // x86_fp80 -> i128 on targets where the value lives in a 16-byte slot.  The
+  // extra bits are padding and are cleared here.
+  if (Val.getBitWidth() < NVT.getSizeInBits())
+    Val = Val.zext(NVT.getSizeInBits());
   if (DAG.getDataLayout().isBigEndian() &&
       CN->getValueType(0).getSimpleVT() == llvm::MVT::ppcf128) {
-    uint64_t words[2] = { CN->getValueAPF().bitcastToAPInt().getRawData()[1],
-                          CN->getValueAPF().bitcastToAPInt().getRawData()[0] };
-    APInt Val(128, words);
-    return DAG.getConstant(Val, SDLoc(CN),
-                           TLI.getTypeToTransformTo(*DAG.getContext(),
-                                                    CN->getValueType(0)));
+    uint64_t words[2] = {Val.getRawData()[1], Val.getRawData()[0]};
+    APInt Swapped(128, words);
+    return DAG.getConstant(Swapped, SDLoc(CN), NVT);
   } else {
-    return DAG.getConstant(CN->getValueAPF().bitcastToAPInt(), SDLoc(CN),
-                           TLI.getTypeToTransformTo(*DAG.getContext(),
-                                                    CN->getValueType(0)));
+    return DAG.getConstant(Val, SDLoc(CN), NVT);
   }
 }
 
@@ -323,12 +334,13 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_EXTRACT_VECTOR_ELT(SDNode *N, unsigned 
 }
 
 SDValue DAGTypeLegalizer::SoftenFloatRes_FABS(SDNode *N) {
-  EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), N->getValueType(0));
+  EVT VT = N->getValueType(0);
+  EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), VT);
   unsigned Size = NVT.getSizeInBits();
 
-  // Mask = ~(1 << (Size-1))
+  // Mask = ~(1 << SignBit)
   APInt API = APInt::getAllOnes(Size);
-  API.clearBit(Size - 1);
+  API.clearBit(TLI.getSoftenedFloatSignBit(VT, NVT));
   SDValue Mask = DAG.getConstant(API, SDLoc(N), NVT);
   SDValue Op = GetSoftenedFloat(N->getOperand(0));
   return DAG.getNode(ISD::AND, SDLoc(N), NVT, Op, Mask);
@@ -425,44 +437,32 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_FCOPYSIGN(SDNode *N) {
   SDValue RHS = BitConvertToInteger(N->getOperand(1));
   SDLoc dl(N);
 
+  EVT VT = N->getValueType(0);
   EVT LVT = LHS.getValueType();
   EVT RVT = RHS.getValueType();
+  unsigned LSignBit = TLI.getSoftenedFloatSignBit(VT, LVT);
+  unsigned RSignBit =
+      TLI.getSoftenedFloatSignBit(N->getOperand(1).getValueType(), RVT);
 
-  unsigned LSize = LVT.getSizeInBits();
-  unsigned RSize = RVT.getSizeInBits();
-
-  // First get the sign bit of second operand.
+  // First get the sign bit of second operand into bit zero.
   SDValue SignBit = DAG.getNode(
-      ISD::SHL, dl, RVT, DAG.getConstant(1, dl, RVT),
-      DAG.getConstant(RSize - 1, dl,
+      ISD::SRL, dl, RVT, RHS,
+      DAG.getConstant(RSignBit, dl,
                       TLI.getShiftAmountTy(RVT, DAG.getDataLayout())));
-  SignBit = DAG.getNode(ISD::AND, dl, RVT, RHS, SignBit);
+  SignBit =
+      DAG.getNode(ISD::AND, dl, RVT, SignBit, DAG.getConstant(1, dl, RVT));
 
-  // Shift right or sign-extend it if the two operands have different types.
-  int SizeDiff = RVT.getSizeInBits() - LVT.getSizeInBits();
-  if (SizeDiff > 0) {
-    SignBit =
-        DAG.getNode(ISD::SRL, dl, RVT, SignBit,
-                    DAG.getConstant(SizeDiff, dl,
-                                    TLI.getShiftAmountTy(SignBit.getValueType(),
-                                                         DAG.getDataLayout())));
-    SignBit = DAG.getNode(ISD::TRUNCATE, dl, LVT, SignBit);
-  } else if (SizeDiff < 0) {
-    SignBit = DAG.getNode(ISD::ANY_EXTEND, dl, LVT, SignBit);
-    SignBit =
-        DAG.getNode(ISD::SHL, dl, LVT, SignBit,
-                    DAG.getConstant(-SizeDiff, dl,
-                                    TLI.getShiftAmountTy(SignBit.getValueType(),
-                                                         DAG.getDataLayout())));
-  }
+  // Move it to the sign position of the result.
+  SignBit = DAG.getZExtOrTrunc(SignBit, dl, LVT);
+  SignBit = DAG.getNode(
+      ISD::SHL, dl, LVT, SignBit,
+      DAG.getConstant(LSignBit, dl,
+                      TLI.getShiftAmountTy(LVT, DAG.getDataLayout())));
 
   // Clear the sign bit of the first operand.
-  SDValue Mask = DAG.getNode(
-      ISD::SHL, dl, LVT, DAG.getConstant(1, dl, LVT),
-      DAG.getConstant(LSize - 1, dl,
-                      TLI.getShiftAmountTy(LVT, DAG.getDataLayout())));
-  Mask = DAG.getNode(ISD::SUB, dl, LVT, Mask, DAG.getConstant(1, dl, LVT));
-  LHS = DAG.getNode(ISD::AND, dl, LVT, LHS, Mask);
+  APInt Mask = APInt::getAllOnes(LVT.getSizeInBits());
+  Mask.clearBit(LSignBit);
+  LHS = DAG.getNode(ISD::AND, dl, LVT, LHS, DAG.getConstant(Mask, dl, LVT));
 
   // Or the value with the sign bit.
   return DAG.getNode(ISD::OR, dl, LVT, LHS, SignBit);
@@ -551,11 +551,13 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_FNEARBYINT(SDNode *N) {
 }
 
 SDValue DAGTypeLegalizer::SoftenFloatRes_FNEG(SDNode *N) {
-  EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), N->getValueType(0));
+  EVT VT = N->getValueType(0);
+  EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), VT);
   SDLoc dl(N);
 
   // Expand Y = FNEG(X) -> Y = X ^ sign mask
-  APInt SignMask = APInt::getSignMask(NVT.getSizeInBits());
+  APInt SignMask = APInt::getOneBitSet(NVT.getSizeInBits(),
+                                       TLI.getSoftenedFloatSignBit(VT, NVT));
   return DAG.getNode(ISD::XOR, dl, NVT, GetSoftenedFloat(N->getOperand(0)),
                      DAG.getConstant(SignMask, dl, NVT));
 }
@@ -921,6 +923,17 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_LOAD(SDNode *N) {
       ~(MachineMemOperand::MOInvariant | MachineMemOperand::MODereferenceable);
   SDValue NewL;
   if (L->getExtensionType() == ISD::NON_EXTLOAD) {
+    // If the source type occupies a wider ABI slot than its in-memory
+    // representation (such as the 16-byte slot of x86_fp80), load the whole
+    // slot as the softened integer type.
+    if (TLI.shouldSoftenFloatMemoryOpToTransformType(VT)) {
+      NewL = DAG.getLoad(L->getAddressingMode(), ISD::NON_EXTLOAD, NVT, dl,
+                         L->getChain(), L->getBasePtr(), L->getOffset(),
+                         L->getPointerInfo(), NVT, L->getBaseAlign(), MMOFlags,
+                         L->getMMOMetadataForSubAccess());
+      ReplaceValueWith(SDValue(N, 1), NewL.getValue(1));
+      return NewL;
+    }
     // If softening widens the integer representation (e.g. x86_fp80 -> i96),
     // load the original memory width and extend to the softened type.
     EVT MemVT = EVT::getIntegerVT(*DAG.getContext(), VT.getSizeInBits());
@@ -1132,9 +1145,14 @@ bool DAGTypeLegalizer::SoftenFloatOperand(SDNode *N, unsigned OpNo) {
 }
 
 SDValue DAGTypeLegalizer::SoftenFloatOp_BITCAST(SDNode *N) {
+  EVT VT = N->getValueType(0);
   SDValue Op0 = GetSoftenedFloat(N->getOperand(0));
+  // The result is narrower than the softened image when the float type
+  // occupies a wider slot than its own representation; take the low bits.
+  if (Op0.getValueType() != VT)
+    return DAG.getZExtOrTrunc(Op0, SDLoc(N), VT);
 
-  return DAG.getNode(ISD::BITCAST, SDLoc(N), N->getValueType(0), Op0);
+  return DAG.getNode(ISD::BITCAST, SDLoc(N), VT, Op0);
 }
 
 SDValue DAGTypeLegalizer::SoftenFloatOp_FP_ROUND(SDNode *N) {
@@ -1356,6 +1374,18 @@ SDValue DAGTypeLegalizer::SoftenFloatOp_STORE(SDNode *N, unsigned OpNo) {
                     DAG.getIntPtrConstant(0, dl, /*isTarget=*/true)));
   else
     Val = GetSoftenedFloat(Val);
+
+  // If the source type occupies a wider ABI slot than its in-memory
+  // representation (such as the 16-byte slot of x86_fp80), store the whole
+  // slot as the softened integer type.
+  if (!ST->isTruncatingStore() &&
+      TLI.shouldSoftenFloatMemoryOpToTransformType(ST->getMemoryVT())) {
+    auto MMOFlags = ST->getMemOperand()->getFlags() &
+                    ~(MachineMemOperand::MOInvariant |
+                      MachineMemOperand::MODereferenceable);
+    return DAG.getStore(ST->getChain(), dl, Val, ST->getBasePtr(),
+                        ST->getPointerInfo(), ST->getBaseAlign(), MMOFlags);
+  }
 
   // If softening widens the integer representation (e.g. x86_fp80 -> i96),
   // truncate the value before storing to preserve the original memory width.

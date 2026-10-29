@@ -495,6 +495,8 @@ def FPEXT_F32_F128 : RuntimeLibcall<FP128, [Flt]>;
 def FPEXT_F16_F128 : RuntimeLibcall;
 def FPEXT_F16_F80 : RuntimeLibcall;
 def FPEXT_F32_F64 : RuntimeLibcall<Dbl, [Flt]>;
+def FPEXT_F32_F80 : RuntimeLibcall;
+def FPEXT_F64_F80 : RuntimeLibcall;
 def FPEXT_F16_F64 : RuntimeLibcall;
 def FPEXT_F16_F32 : RuntimeLibcall;
 def FPROUND_F32_F16 : RuntimeLibcall;
@@ -598,7 +600,7 @@ def CONVERT_PPCF128_F128 : RuntimeLibcall;
 // The FCMP3_PRED_*_F* libcalls return a three-way (-1/0/1) result, one symbol
 // per predicate. FCMP3_F* is a generic three-way compare for ABIs with one
 // symbol serving every predicate (e.g. MSP430's __mspabi_cmpd).
-foreach FPTy = ["F32", "F64", "F128", "PPCF128"] in {
+foreach FPTy = ["F32", "F64", "F80", "F128", "PPCF128"] in {
   def OEQ_#FPTy : RuntimeLibcall;
   def UNE_#FPTy : RuntimeLibcall;
   def OGE_#FPTy : RuntimeLibcall;
@@ -1284,6 +1286,8 @@ def __extenddftf2 : RuntimeLibcallImpl<FPEXT_F64_F128>;
 def __extendsftf2 : RuntimeLibcallImpl<FPEXT_F32_F128>;
 def __extendhftf2 : RuntimeLibcallImpl<FPEXT_F16_F128>;
 def __extendhfxf2 : RuntimeLibcallImpl<FPEXT_F16_F80>;
+def __extendsfxf2 : RuntimeLibcallImpl<FPEXT_F32_F80>;
+def __extenddfxf2 : RuntimeLibcallImpl<FPEXT_F64_F80>;
 def __extendsfdf2 : RuntimeLibcallImpl<FPEXT_F32_F64>;
 def __extendhfdf2 : RuntimeLibcallImpl<FPEXT_F16_F64>;
 def __extendhfsf2 : RuntimeLibcallImpl<FPEXT_F16_F32>;
@@ -1383,6 +1387,12 @@ def __trunctfkf2 : RuntimeLibcallImpl<CONVERT_PPCF128_F128>;
 
 // Comparison. These return a three-way -1/0/1 result (FCMP3_PRED_*_F*), not a
 // boolean.
+def __eqxf2 : RuntimeLibcallImpl<FCMP3_PRED_OEQ_F80>;
+def __nexf2 : RuntimeLibcallImpl<FCMP3_PRED_UNE_F80>;
+def __gexf2 : RuntimeLibcallImpl<FCMP3_PRED_OGE_F80>;
+def __ltxf2 : RuntimeLibcallImpl<FCMP3_PRED_OLT_F80>;
+def __lexf2 : RuntimeLibcallImpl<FCMP3_PRED_OLE_F80>;
+def __gtxf2 : RuntimeLibcallImpl<FCMP3_PRED_OGT_F80>;
 def __eqsf2 : RuntimeLibcallImpl<FCMP3_PRED_OEQ_F32>;
 def __eqdf2 : RuntimeLibcallImpl<FCMP3_PRED_OEQ_F64>;
 def __eqtf2 : RuntimeLibcallImpl<FCMP3_PRED_OEQ_F128>;
@@ -1409,6 +1419,7 @@ def __gttf2 : RuntimeLibcallImpl<FCMP3_PRED_OGT_F128>;
 def __gcc_qgt : RuntimeLibcallImpl<FCMP3_PRED_OGT_PPCF128>;
 def __unordsf2 : RuntimeLibcallImpl<UO_F32>;
 def __unorddf2 : RuntimeLibcallImpl<UO_F64>;
+def __unordxf2 : RuntimeLibcallImpl<UO_F80>;
 def __unordtf2 : RuntimeLibcallImpl<UO_F128>;
 def __gcc_qunord : RuntimeLibcallImpl<UO_PPCF128>;
 
@@ -2381,11 +2392,107 @@ def AArch64SystemLibrary : SystemRuntimeLibrary<isAArch64_ExceptArm64EC,
   ["compiler-rt", "libatomic", "llvm-client-runtime", "libm", "libc", "unwind",
    "sme"]>;
 
+// The ARM64EC helpers for the x87 `long double` format.  They are not the
+// exact x87 soft-float helpers of libgcc: the value stays an 80-bit x87 image
+// in a 16-byte slot, but every operation on it is carried out in `double`.
+// They carry an `__arm64ec_` prefix of their own so that they cannot be
+// confused with, or silently bound to, an exact implementation of the same
+// format.
+defset list<RuntimeLibcallImpl> Arm64ECF80Impls = {
+def arm64ec___addxf3 : RuntimeLibcallImpl<ADD_F80, "__arm64ec_addxf3">;
+def arm64ec___subxf3 : RuntimeLibcallImpl<SUB_F80, "__arm64ec_subxf3">;
+def arm64ec___mulxf3 : RuntimeLibcallImpl<MUL_F80, "__arm64ec_mulxf3">;
+def arm64ec___divxf3 : RuntimeLibcallImpl<DIV_F80, "__arm64ec_divxf3">;
+
+// Neither libgcc nor compiler-rt has a single-rounding fused multiply-add
+// helper for this format; the fused operation is carried out in `double`.
+def arm64ec___fmaxf3 : RuntimeLibcallImpl<FMA_F80, "__arm64ec_fmaxf3">;
+
+// The `maxnum`/`minnum` forms are the libm ones elsewhere; here they are part
+// of the same set as the rest of the format.
+def arm64ec___fmaxxf3 : RuntimeLibcallImpl<FMAX_F80, "__arm64ec_fmaxxf3">;
+def arm64ec___fminxf3 : RuntimeLibcallImpl<FMIN_F80, "__arm64ec_fminxf3">;
+
+def arm64ec___powixf2 : RuntimeLibcallImpl<POWI_F80, "__arm64ec_powixf2">;
+
+def arm64ec___extendhfxf2
+    : RuntimeLibcallImpl<FPEXT_F16_F80, "__arm64ec_extendhfxf2">;
+def arm64ec___extendsfxf2
+    : RuntimeLibcallImpl<FPEXT_F32_F80, "__arm64ec_extendsfxf2">;
+def arm64ec___extenddfxf2
+    : RuntimeLibcallImpl<FPEXT_F64_F80, "__arm64ec_extenddfxf2">;
+def arm64ec___extendxftf2
+    : RuntimeLibcallImpl<FPEXT_F80_F128, "__arm64ec_extendxftf2">;
+def arm64ec___truncxfhf2
+    : RuntimeLibcallImpl<FPROUND_F80_F16, "__arm64ec_truncxfhf2">;
+def arm64ec___truncxfbf2
+    : RuntimeLibcallImpl<FPROUND_F80_BF16, "__arm64ec_truncxfbf2">;
+def arm64ec___truncxfsf2
+    : RuntimeLibcallImpl<FPROUND_F80_F32, "__arm64ec_truncxfsf2">;
+def arm64ec___truncxfdf2
+    : RuntimeLibcallImpl<FPROUND_F80_F64, "__arm64ec_truncxfdf2">;
+def arm64ec___trunctfxf2
+    : RuntimeLibcallImpl<FPROUND_F128_F80, "__arm64ec_trunctfxf2">;
+def arm64ec___fixxfsi
+    : RuntimeLibcallImpl<FPTOSINT_F80_I32, "__arm64ec_fixxfsi">;
+def arm64ec___fixxfdi
+    : RuntimeLibcallImpl<FPTOSINT_F80_I64, "__arm64ec_fixxfdi">;
+def arm64ec___fixxfti
+    : RuntimeLibcallImpl<FPTOSINT_F80_I128, "__arm64ec_fixxfti">;
+def arm64ec___fixunsxfsi
+    : RuntimeLibcallImpl<FPTOUINT_F80_I32, "__arm64ec_fixunsxfsi">;
+def arm64ec___fixunsxfdi
+    : RuntimeLibcallImpl<FPTOUINT_F80_I64, "__arm64ec_fixunsxfdi">;
+def arm64ec___fixunsxfti
+    : RuntimeLibcallImpl<FPTOUINT_F80_I128, "__arm64ec_fixunsxfti">;
+def arm64ec___floatsixf
+    : RuntimeLibcallImpl<SINTTOFP_I32_F80, "__arm64ec_floatsixf">;
+def arm64ec___floatdixf
+    : RuntimeLibcallImpl<SINTTOFP_I64_F80, "__arm64ec_floatdixf">;
+def arm64ec___floattixf
+    : RuntimeLibcallImpl<SINTTOFP_I128_F80, "__arm64ec_floattixf">;
+def arm64ec___floatunsixf
+    : RuntimeLibcallImpl<UINTTOFP_I32_F80, "__arm64ec_floatunsixf">;
+def arm64ec___floatundixf
+    : RuntimeLibcallImpl<UINTTOFP_I64_F80, "__arm64ec_floatundixf">;
+def arm64ec___floatuntixf
+    : RuntimeLibcallImpl<UINTTOFP_I128_F80, "__arm64ec_floatuntixf">;
+def arm64ec___eqxf2
+    : RuntimeLibcallImpl<FCMP3_PRED_OEQ_F80, "__arm64ec_eqxf2">;
+def arm64ec___nexf2
+    : RuntimeLibcallImpl<FCMP3_PRED_UNE_F80, "__arm64ec_nexf2">;
+def arm64ec___gexf2
+    : RuntimeLibcallImpl<FCMP3_PRED_OGE_F80, "__arm64ec_gexf2">;
+def arm64ec___ltxf2
+    : RuntimeLibcallImpl<FCMP3_PRED_OLT_F80, "__arm64ec_ltxf2">;
+def arm64ec___lexf2
+    : RuntimeLibcallImpl<FCMP3_PRED_OLE_F80, "__arm64ec_lexf2">;
+def arm64ec___gtxf2
+    : RuntimeLibcallImpl<FCMP3_PRED_OGT_F80, "__arm64ec_gtxf2">;
+def arm64ec___unordxf2 : RuntimeLibcallImpl<UO_F80, "__arm64ec_unordxf2">;
+}
+
+// The x87 forms of the C library math functions.  `LibmLibcallImpls` describes
+// them as long double implementations, which `DuplicateLibcallImplWithPrefix`
+// cannot copy (their `Provides` is left open until the module's long double
+// format is known), so they are spelled out as plain implementations of the F80
+// libcall each of them provides.  `fma` is left out: the fused multiply-add is
+// one of the compiler-rt helpers above.
+defset list<RuntimeLibcallImpl> Arm64ECX87LibmImpls = {
+  foreach entry = !listremove(LibmCoreImpls_ldbl_noFrexpLdexp, [fmal]) in {
+    defvar ldbl = !cast<LongDoubleLibcallImpl>(entry);
+    def arm64ec_ldbl_#entry
+        : RuntimeLibcallImpl<ldbl.ProvidesF80, ldbl.LibCallFuncName>;
+  }
+}
+
 // The Windows runtime lacks the f32 and f64 powi helpers, and frexpf/ldexpf.
+// ARM64EC still uses the x87 `long double` format, whose helpers are part of
+// compiler-rt as well.
 defvar Arm64ECCompilerRtImpls =
-    !listremove(CompilerRtLibgccImpls_core,
-                !listremove(PowiLibcallImpls, [__powitf2_f128, __powitf2_ppc128]));
-defvar Arm64ECLibmImpls = !listremove(LibmCoreImpls_core, LibmFrexpLdexpF32);
+    !listconcat(CompilerRtLibgccImpls_core_noPowi, Arm64ECF80Impls);
+defvar Arm64ECLibmImpls = !listconcat(
+    !listremove(LibmCoreImpls_core, LibmFrexpLdexpF32), Arm64ECX87LibmImpls);
 
 // Prepend a # to every name
 defset list<RuntimeLibcallImpl> WinArm64ECDefaultRuntimeLibcallImpls = {

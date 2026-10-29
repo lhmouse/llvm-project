@@ -271,11 +271,15 @@ RTLIB::Libcall RTLIB::getFPEXT(EVT OpVT, EVT RetVT) {
   } else if (OpVT == MVT::f32) {
     if (RetVT == MVT::f64)
       return FPEXT_F32_F64;
+    if (RetVT == MVT::f80)
+      return FPEXT_F32_F80;
     if (RetVT == MVT::f128)
       return FPEXT_F32_F128;
     if (RetVT == MVT::ppcf128)
       return FPEXT_F32_PPCF128;
   } else if (OpVT == MVT::f64) {
+    if (RetVT == MVT::f80)
+      return FPEXT_F64_F80;
     if (RetVT == MVT::f128)
       return FPEXT_F64_F128;
     else if (RetVT == MVT::ppcf128)
@@ -1492,11 +1496,20 @@ void TargetLoweringBase::computeRegisterProperties(
   }
 
   // Decide how to handle f80. If the target does not have native f80 support,
-  // expand it to i96 and we will be generating soft float library calls.
+  // soften it and we will be generating soft float library calls.  On a 64-bit
+  // target the integer registers are wide enough to hold the 16-byte slot the
+  // value occupies, and the helpers take and return the whole image; 32-bit
+  // targets keep the historical 3x i32 image instead.
   if (!isTypeLegal(MVT::f80)) {
-    NumRegistersForVT[MVT::f80] = 3*NumRegistersForVT[MVT::i32];
-    RegisterTypeForVT[MVT::f80] = RegisterTypeForVT[MVT::i32];
-    TransformToType[MVT::f80] = MVT::i32;
+    if (isTypeLegal(MVT::i64)) {
+      NumRegistersForVT[MVT::f80] = NumRegistersForVT[MVT::i128];
+      RegisterTypeForVT[MVT::f80] = RegisterTypeForVT[MVT::i128];
+      TransformToType[MVT::f80] = MVT::i128;
+    } else {
+      NumRegistersForVT[MVT::f80] = 3 * NumRegistersForVT[MVT::i32];
+      RegisterTypeForVT[MVT::f80] = RegisterTypeForVT[MVT::i32];
+      TransformToType[MVT::f80] = MVT::i32;
+    }
     ValueTypeActions.setTypeAction(MVT::f80, TypeSoftenFloat);
   }
 

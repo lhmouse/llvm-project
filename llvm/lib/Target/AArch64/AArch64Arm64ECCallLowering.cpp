@@ -343,9 +343,20 @@ ThunkArgInfo AArch64Arm64ECCallLowering::canonicalizeThunkType(
     return pointerIndirection(T);
   }
 
+  if (T->isX86_FP80Ty()) {
+    // An 80-bit `long double` occupies a 16-byte slot with 16-byte alignment,
+    // and it is always passed and returned in memory rather than in a
+    // floating-point register, so it is canonicalized as a 16-byte memory
+    // argument.
+    Out << "m16";
+    if (!Ret)
+      Out << "a16";
+    return pointerIndirection(T);
+  }
+
   if (T->isFloatingPointTy()) {
     report_fatal_error(
-        "Only half, bfloat16, float, double, and fp128 are supported "
+        "Only half, bfloat16, float, double, fp128 and x86_fp80 are supported "
         "for ARM64EC thunks");
   }
 
@@ -362,7 +373,7 @@ ThunkArgInfo AArch64Arm64ECCallLowering::canonicalizeThunkType(
     uint64_t TotalSizeBytes = ElementCnt * ElementSizePerBytes;
     if (ElementTy->isHalfTy() || ElementTy->isBFloatTy() ||
         ElementTy->isFloatTy() || ElementTy->isDoubleTy() ||
-        ElementTy->isFP128Ty()) {
+        ElementTy->isFP128Ty() || ElementTy->isX86_FP80Ty()) {
       if (ElementTy->isHalfTy())
         // Prefix with `llvm` since MSVC doesn't specify `_Float16`
         Out << "__llvm_H__";
@@ -376,6 +387,9 @@ ThunkArgInfo AArch64Arm64ECCallLowering::canonicalizeThunkType(
       else if (ElementTy->isFP128Ty())
         // Prefix with `llvm` since MSVC doesn't specify `_Float128`
         Out << "__llvm_Q__";
+      else if (ElementTy->isX86_FP80Ty())
+        // An array of 80-bit `long double` is always in memory.
+        Out << "__llvm_X__";
       Out << TotalSizeBytes;
       if (Alignment.value() >= 16 && !Ret)
         Out << "a" << Alignment.value();
@@ -389,8 +403,8 @@ ThunkArgInfo AArch64Arm64ECCallLowering::canonicalizeThunkType(
       }
     } else if (ElementTy->isFloatingPointTy()) {
       report_fatal_error(
-          "Only half, bfloat16, float, double, and fp128 are supported "
-          "for ARM64EC thunks");
+          "Only half, bfloat16, float, double, fp128 and x86_fp80 are "
+          "supported for ARM64EC thunks");
     }
   }
 
@@ -566,8 +580,15 @@ Function *AArch64Arm64ECCallLowering::buildEntryThunk(Function *F) {
 
   bool TransformDirectToSRet = X64RetType->isVoidTy() && !RetTy->isVoidTy();
   unsigned ThunkArgOffset = TransformDirectToSRet ? 2 : 1;
+  // For a variadic function, the last parameter of the thunk is the pointer to
+  // the x64 stack arguments, and the four parameters before it model the four
+  // integer argument registers.  If the x64 side returns the value indirectly,
+  // the hidden return pointer takes the first of those registers, so only
+  // three of the four arguments are available in registers.
+  unsigned StackArgsArg = Thunk->arg_size() - 1;
+  unsigned NumArgRegSlots = TransformDirectToSRet ? 3 : 4;
   unsigned PassthroughArgSize =
-      (F->isVarArg() ? 5 : Thunk->arg_size()) - ThunkArgOffset;
+      F->isVarArg() ? NumArgRegSlots : Thunk->arg_size() - ThunkArgOffset;
   assert(ArgTranslations.size() == (F->isVarArg() ? 5 : PassthroughArgSize));
 
   // Translate arguments to call.
@@ -592,16 +613,28 @@ Function *AArch64Arm64ECCallLowering::buildEntryThunk(Function *F) {
   }
 
   if (F->isVarArg()) {
-    // The 5th argument to variadic entry thunks is used to model the x64 sp
+    // The last argument to variadic entry thunks is used to model the x64 sp
     // which is passed to the thunk in x4, this can be passed to the callee as
     // the variadic argument start address after skipping over the 32 byte
     // shadow store.
 
     // The EC thunk CC will assign any argument marked as InReg to x4.
-    Thunk->addParamAttr(5, Attribute::InReg);
-    Value *Arg = Thunk->getArg(5);
-    Arg = IRB.CreatePtrAdd(Arg, IRB.getInt64(0x20));
-    Args.push_back(Arg);
+    Thunk->addParamAttr(StackArgsArg, Attribute::InReg);
+    Value *StackArgs = Thunk->getArg(StackArgsArg);
+
+    // x4 points at the 32 byte shadow store, so the first stack argument is
+    // 32 bytes further up.  When the hidden return pointer took the first
+    // integer argument register, the x64 caller can only pass three of the
+    // four arguments in registers, and the fourth one, which is the first one
+    // on the stack, fills the last slot of the callee's register save area.
+    uint64_t StackOffset = 0x20;
+    if (TransformDirectToSRet) {
+      Args.push_back(IRB.CreateAlignedLoad(
+          IRB.getInt64Ty(),
+          IRB.CreatePtrAdd(StackArgs, IRB.getInt64(StackOffset)), Align(8)));
+      StackOffset += 8;
+    }
+    Args.push_back(IRB.CreatePtrAdd(StackArgs, IRB.getInt64(StackOffset)));
 
     // Pass in a zero variadic argument size (in x5).
     Args.push_back(IRB.getInt64(0));

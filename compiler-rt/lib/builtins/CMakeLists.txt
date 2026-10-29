@@ -898,7 +898,11 @@ set(armv7k_SOURCES ${arm_SOURCES})
 set(arm64_SOURCES ${aarch64_SOURCES})
 set(arm64e_SOURCES ${aarch64_SOURCES})
 set(arm64_32_SOURCES ${aarch64_SOURCES})
-set(arm64ec_SOURCES ${aarch64_SOURCES})
+# ARM64EC keeps the x87 `long double` format, but has no x87 instructions to
+# operate on it, so the complex helpers that the x86 list below builds from
+# `x86_80_BIT_SOURCES` are built here on top of the softened format instead.
+set(arm64ec_SOURCES ${aarch64_SOURCES} arm64ec/x87_long_double.c divxc3.c
+    mulxc3.c)
 set(aarch64_lfi_SOURCES ${aarch64_SOURCES})
 set(aarch64_be_SOURCES ${aarch64_SOURCES})
 
