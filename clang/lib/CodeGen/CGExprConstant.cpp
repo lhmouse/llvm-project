@@ -2979,9 +2979,16 @@ CodeGenModule::EmitSoftX87LdConstant(const llvm::APFloat &Value) {
   // image is therefore `significand | (sign_exponent << 64)`, which is exactly
   // what APFloat::bitcastToAPInt() returns for this format: the constant is
   // bit-exact, nothing is rounded here, and the padding bytes are zero.
+  //
+  // There is only one x87 format and Arm64EC always lays it out in a 16-byte
+  // slot, so the width is a constant and does not depend on the target's
+  // current `long double` mode; it matches the `i128` that
+  // CodeGenTypes::ConvertType() picks for `BuiltinType::LongDouble`.
   assert(&Value.getSemantics() == &llvm::APFloat::x87DoubleExtended() &&
          "expected the x87 extended format");
-  unsigned Width = getContext().getTypeSize(getContext().LongDoubleTy);
+  constexpr unsigned Width = 128;
+  assert(getContext().getTypeSize(getContext().LongDoubleTy) == Width &&
+         "the x87 `long double` slot is 16 bytes wide");
   return llvm::ConstantInt::get(llvm::IntegerType::get(getLLVMContext(), Width),
-                                Value.bitcastToAPInt().zextOrTrunc(Width));
+                                Value.bitcastToAPInt().zext(Width));
 }
