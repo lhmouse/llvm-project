@@ -3570,12 +3570,6 @@ ABIArgInfo WinX86_64ABIInfo::classify(QualType Ty, unsigned &FreeSSERegs,
   if (Ty->isVoidType())
     return ABIArgInfo::getIgnore();
 
-  // The 80-bit `long double` is passed and returned in memory.
-  if (getTarget().hasSoftX87LongDouble() &&
-      Ty->isSpecificBuiltinType(BuiltinType::LongDouble))
-    return getNaturalAlignIndirect(Ty, getDataLayout().getAllocaAddrSpace(),
-                                   /*ByVal=*/false);
-
   bool PromoteScopedEnum = false;
   if (const auto *ED = Ty->getAsEnumDecl()) {
     Ty = ED->getIntegerType();
