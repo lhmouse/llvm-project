@@ -891,27 +891,30 @@ void vectorTests() {
   }
 
   // long double vector
-  //
-  // FIXME clang generates incomtable layout with GCC.
-  //
-  // {
-  //   LongDouble3Vec v1, v2;
-  //   memset(&v1, 42, sizeof(LongDouble3Vec));
-  //   memset(&v2, 0, sizeof(LongDouble3Vec));
-  //
-  //   v1[0] = 1.0L;
-  //   v1[1] = 2.0L;
-  //   v1[2] = 3.0L;
-  //   v2[0] = 1.0L;
-  //   v2[1] = 2.0L;
-  //   v2[2] = 3.0L;
-  //
-  //   std::__clear_padding_if_needed(v1);
-  //   assert(v1[0] == 1.0L);
-  //   assert(v1[1] == 2.0L);
-  //   assert(v1[2] == 3.0L);
-  //   assert(memcmp(&v1, &v2, sizeof(LongDouble3Vec)) == 0);
-  // }
+#  if defined(__arm64ec__) && __LDBL_MANT_DIG__ == 64
+  // A vector of x87 `long double` is laid out with 10-byte elements, while
+  // the format occupies a 16-byte ABI slot, so the padding of an element
+  // cannot be cleared without clobbering its neighbours.
+#  else
+  {
+    LongDouble3Vec v1, v2;
+    memset(&v1, 42, sizeof(LongDouble3Vec));
+    memset(&v2, 0, sizeof(LongDouble3Vec));
+
+    v1[0] = 1.0L;
+    v1[1] = 2.0L;
+    v1[2] = 3.0L;
+    v2[0] = 1.0L;
+    v2[1] = 2.0L;
+    v2[2] = 3.0L;
+
+    std::__clear_padding_if_needed(v1);
+    assert(v1[0] == 1.0L);
+    assert(v1[1] == 2.0L);
+    assert(v1[2] == 3.0L);
+    assert(memcmp(&v1, &v2, sizeof(LongDouble3Vec)) == 0);
+  }
+#  endif
 
   // float vector
   {
