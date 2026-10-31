@@ -926,7 +926,7 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_LOAD(SDNode *N) {
     // If the source type occupies a wider ABI slot than its in-memory
     // representation (such as the 16-byte slot of x86_fp80), load the whole
     // slot as the softened integer type.
-    if (TLI.shouldSoftenFloatMemoryOpToTransformType(VT)) {
+    if (TLI.shouldUseTransformTypeForMemOp(VT)) {
       NewL = DAG.getLoad(L->getAddressingMode(), ISD::NON_EXTLOAD, NVT, dl,
                          L->getChain(), L->getBasePtr(), L->getOffset(),
                          L->getPointerInfo(), NVT, L->getBaseAlign(), MMOFlags,
@@ -1379,7 +1379,7 @@ SDValue DAGTypeLegalizer::SoftenFloatOp_STORE(SDNode *N, unsigned OpNo) {
   // representation (such as the 16-byte slot of x86_fp80), store the whole
   // slot as the softened integer type.
   if (!ST->isTruncatingStore() &&
-      TLI.shouldSoftenFloatMemoryOpToTransformType(ST->getMemoryVT())) {
+      TLI.shouldUseTransformTypeForMemOp(ST->getMemoryVT())) {
     auto MMOFlags = ST->getMemOperand()->getFlags() &
                     ~(MachineMemOperand::MOInvariant |
                       MachineMemOperand::MODereferenceable);

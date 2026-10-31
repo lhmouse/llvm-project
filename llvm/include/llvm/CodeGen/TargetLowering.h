@@ -1206,15 +1206,16 @@ public:
     return LegalVT;
   }
 
-  /// Return true if a non-truncating memory operation on a softened
-  /// floating-point value of type \p VT should use the integer type the value
-  /// was softened to as its memory type.  This is useful when the source type
-  /// occupies a wider ABI slot than its in-memory representation, such as the
-  /// x87 80-bit format, which is held in a 16-byte slot: the value is then
-  /// loaded and stored as one 16-byte integer instead of a partial load.
-  virtual bool shouldSoftenFloatMemoryOpToTransformType(EVT VT) const {
-    return false;
-  }
+  /// Return true if a non-truncating memory operation on a value of type \p VT
+  /// that is being softened should use the integer type it is softened to (see
+  /// getTypeToTransformTo) as its memory type, rather than the value's
+  /// in-memory width.  This is useful when the source type occupies a wider ABI
+  /// slot than its in-memory representation, such as the x87 80-bit format,
+  /// which is held in a 16-byte slot: the value is then loaded and stored as
+  /// one 16-byte integer instead of a partial load or store.
+  ///
+  /// Only the soft-float legalizer consults this hook.
+  virtual bool shouldUseTransformTypeForMemOp(EVT VT) const { return false; }
 
   /// Return the position of the sign bit in the integer representation of a
   /// softened floating-point value of type \p VT whose transform type is \p

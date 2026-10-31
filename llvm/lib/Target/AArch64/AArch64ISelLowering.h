@@ -214,7 +214,7 @@ public:
   bool shouldReduceLoadWidth(SDNode *Load, ISD::LoadExtType ExtTy, EVT NewVT,
                              std::optional<unsigned> ByteOffset) const override;
 
-  bool shouldSoftenFloatMemoryOpToTransformType(EVT VT) const override;
+  bool shouldUseTransformTypeForMemOp(EVT VT) const override;
 
   unsigned getSoftenedFloatSignBit(EVT VT, EVT NVT) const override;
 
