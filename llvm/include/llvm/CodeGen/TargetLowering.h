@@ -1206,26 +1206,6 @@ public:
     return LegalVT;
   }
 
-  /// Return true if a non-truncating memory operation on a value of type \p VT
-  /// that is being softened should use the integer type it is softened to (see
-  /// getTypeToTransformTo) as its memory type, rather than the value's
-  /// in-memory width.  This is useful when the source type occupies a wider ABI
-  /// slot than its in-memory representation, such as the x87 80-bit format,
-  /// which is held in a 16-byte slot: the value is then loaded and stored as
-  /// one 16-byte integer instead of a partial load or store.
-  ///
-  /// Only the soft-float legalizer consults this hook.
-  virtual bool shouldUseTransformTypeForMemOp(EVT VT) const { return false; }
-
-  /// Return the position of the sign bit in the integer representation of a
-  /// softened floating-point value of type \p VT whose transform type is \p
-  /// NVT.  The default assumes that the sign is the most significant bit of
-  /// the transform type, which does not hold when the transform type is wider
-  /// than the source type (such as x86_fp80 softened to i128).
-  virtual unsigned getSoftenedFloatSignBit(EVT VT, EVT NVT) const {
-    return NVT.getSizeInBits() - 1;
-  }
-
   /// For types supported by the target, this is an identity function.  For
   /// types that must be expanded (i.e. integer types that are larger than the
   /// largest integer register or illegal floating point types), this returns

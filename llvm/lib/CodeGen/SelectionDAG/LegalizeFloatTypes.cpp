@@ -50,6 +50,18 @@ static RTLIB::Libcall GetFPLibCall(EVT VT,
     RTLIB::UNKNOWN_LIBCALL;
 }
 
+/// Return the position of the sign bit in the integer representation \p NVT of
+/// a softened floating-point value of type \p VT.
+static unsigned getSoftenedFloatSignBit(EVT VT, EVT NVT) {
+  // A softened value normally has the sign in the most significant bit of its
+  // integer representation, like the floating-point type it came from.  This
+  // does not hold when the value is widened into a larger image, such as the
+  // x87 80-bit format in a 16-byte slot, where the sign stays in bit 79.
+  if (VT == MVT::f80 && NVT.getSizeInBits() > 79)
+    return 79;
+  return NVT.getSizeInBits() - 1;
+}
+
 //===----------------------------------------------------------------------===//
 //  Convert Float Results to Integer
 //===----------------------------------------------------------------------===//
@@ -340,7 +352,7 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_FABS(SDNode *N) {
 
   // Mask = ~(1 << SignBit)
   APInt API = APInt::getAllOnes(Size);
-  API.clearBit(TLI.getSoftenedFloatSignBit(VT, NVT));
+  API.clearBit(getSoftenedFloatSignBit(VT, NVT));
   SDValue Mask = DAG.getConstant(API, SDLoc(N), NVT);
   SDValue Op = GetSoftenedFloat(N->getOperand(0));
   return DAG.getNode(ISD::AND, SDLoc(N), NVT, Op, Mask);
@@ -440,9 +452,9 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_FCOPYSIGN(SDNode *N) {
   EVT VT = N->getValueType(0);
   EVT LVT = LHS.getValueType();
   EVT RVT = RHS.getValueType();
-  unsigned LSignBit = TLI.getSoftenedFloatSignBit(VT, LVT);
+  unsigned LSignBit = getSoftenedFloatSignBit(VT, LVT);
   unsigned RSignBit =
-      TLI.getSoftenedFloatSignBit(N->getOperand(1).getValueType(), RVT);
+      getSoftenedFloatSignBit(N->getOperand(1).getValueType(), RVT);
 
   // First get the sign bit of second operand into bit zero.
   SDValue SignBit = DAG.getNode(
@@ -557,7 +569,7 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_FNEG(SDNode *N) {
 
   // Expand Y = FNEG(X) -> Y = X ^ sign mask
   APInt SignMask = APInt::getOneBitSet(NVT.getSizeInBits(),
-                                       TLI.getSoftenedFloatSignBit(VT, NVT));
+                                       getSoftenedFloatSignBit(VT, NVT));
   return DAG.getNode(ISD::XOR, dl, NVT, GetSoftenedFloat(N->getOperand(0)),
                      DAG.getConstant(SignMask, dl, NVT));
 }
@@ -923,10 +935,10 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_LOAD(SDNode *N) {
       ~(MachineMemOperand::MOInvariant | MachineMemOperand::MODereferenceable);
   SDValue NewL;
   if (L->getExtensionType() == ISD::NON_EXTLOAD) {
-    // If the source type occupies a wider ABI slot than its in-memory
-    // representation (such as the 16-byte slot of x86_fp80), load the whole
-    // slot as the softened integer type.
-    if (TLI.shouldUseTransformTypeForMemOp(VT)) {
+    // If the value was widened to cover a whole ABI slot (such as the 16-byte
+    // slot of x86_fp80), the transform type is that slot: load all of it
+    // rather than a partial load of the in-memory representation.
+    if (NVT.getSizeInBits() > VT.getSizeInBits()) {
       NewL = DAG.getLoad(L->getAddressingMode(), ISD::NON_EXTLOAD, NVT, dl,
                          L->getChain(), L->getBasePtr(), L->getOffset(),
                          L->getPointerInfo(), NVT, L->getBaseAlign(), MMOFlags,
@@ -934,8 +946,8 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_LOAD(SDNode *N) {
       ReplaceValueWith(SDValue(N, 1), NewL.getValue(1));
       return NewL;
     }
-    // If softening widens the integer representation (e.g. x86_fp80 -> i96),
-    // load the original memory width and extend to the softened type.
+    // If softening narrows the integer representation (e.g. x86_fp80 -> i32 on
+    // 32 bit targets), load the original memory width and extend it.
     EVT MemVT = EVT::getIntegerVT(*DAG.getContext(), VT.getSizeInBits());
     NewL = DAG.getLoad(L->getAddressingMode(), ISD::EXTLOAD, NVT, dl,
                        L->getChain(), L->getBasePtr(), L->getOffset(),
@@ -1375,20 +1387,24 @@ SDValue DAGTypeLegalizer::SoftenFloatOp_STORE(SDNode *N, unsigned OpNo) {
   else
     Val = GetSoftenedFloat(Val);
 
-  // If the source type occupies a wider ABI slot than its in-memory
-  // representation (such as the 16-byte slot of x86_fp80), store the whole
-  // slot as the softened integer type.
-  if (!ST->isTruncatingStore() &&
-      TLI.shouldUseTransformTypeForMemOp(ST->getMemoryVT())) {
-    auto MMOFlags = ST->getMemOperand()->getFlags() &
-                    ~(MachineMemOperand::MOInvariant |
-                      MachineMemOperand::MODereferenceable);
-    return DAG.getStore(ST->getChain(), dl, Val, ST->getBasePtr(),
-                        ST->getPointerInfo(), ST->getBaseAlign(), MMOFlags);
+  // If the value was widened to cover a whole ABI slot (such as the 16-byte
+  // slot of x86_fp80), the transform type is that slot: store all of it rather
+  // than a partial store of the in-memory representation.
+  if (!ST->isTruncatingStore()) {
+    EVT MemVT = ST->getMemoryVT();
+    EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), MemVT);
+    if (NVT.getSizeInBits() > MemVT.getSizeInBits()) {
+      auto MMOFlags = ST->getMemOperand()->getFlags() &
+                      ~(MachineMemOperand::MOInvariant |
+                        MachineMemOperand::MODereferenceable);
+      return DAG.getStore(ST->getChain(), dl, Val, ST->getBasePtr(),
+                          ST->getPointerInfo(), ST->getBaseAlign(), MMOFlags);
+    }
   }
 
-  // If softening widens the integer representation (e.g. x86_fp80 -> i96),
-  // truncate the value before storing to preserve the original memory width.
+  // If softening narrows the integer representation (e.g. x86_fp80 -> i32 on
+  // 32 bit targets), truncate the value before storing to preserve the
+  // original memory width.
   EVT MemVT =
       EVT::getIntegerVT(*DAG.getContext(), ST->getMemoryVT().getSizeInBits());
   return DAG.getTruncStore(ST->getChain(), dl, Val, ST->getBasePtr(), MemVT,

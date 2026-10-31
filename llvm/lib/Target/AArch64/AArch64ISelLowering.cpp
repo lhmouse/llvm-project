@@ -18869,22 +18869,6 @@ bool AArch64TargetLowering::shouldReduceLoadWidth(
   return true;
 }
 
-bool AArch64TargetLowering::shouldUseTransformTypeForMemOp(EVT VT) const {
-  // ARM64EC keeps `long double` in the x87 80-bit format, which occupies a
-  // 16-byte, 16-byte-aligned slot.  The value is softened to i128, so the
-  // whole slot is loaded and stored as one integer rather than doing an
-  // extending load of its first 10 bytes.
-  return Subtarget->getTargetTriple().isWindowsArm64EC() && VT == MVT::f80;
-}
-
-unsigned AArch64TargetLowering::getSoftenedFloatSignBit(EVT VT, EVT NVT) const {
-  // The x87 80-bit image keeps the sign in bit 15 of the word at offset 8,
-  // that is bit 79 of the 16-byte little-endian slot.
-  if (VT == MVT::f80)
-    return 79;
-  return NVT.getSizeInBits() - 1;
-}
-
 // Treat a sext_inreg(extract(..)) as free if it has multiple uses.
 bool AArch64TargetLowering::shouldRemoveRedundantExtend(SDValue Extend) const {
   EVT VT = Extend.getValueType();
