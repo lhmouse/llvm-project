@@ -581,12 +581,17 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_FP_EXTEND(SDNode *N) {
 
   SDValue Chain = IsStrict ? N->getOperand(0) : SDValue();
 
-  // There's only a libcall for f16 -> f32 and shifting is only valid for bf16
-  // -> f32, so proceed in two stages. Also, it's entirely possible for both
-  // f16 and f32 to be legal, so use the fully hard-float FP_EXTEND rather
-  // than FP16_TO_FP.
+  // There is only a libcall for f16 -> f32, and shifting is only valid for
+  // bf16 -> f32, so proceed in two stages unless the target provides a helper
+  // for the pair itself, as is the case for the 80-bit x87 format. Also, it's
+  // entirely possible for both f16 and f32 to be legal, so use the fully
+  // hard-float FP_EXTEND rather than FP16_TO_FP.
+  bool ExtendDirectly =
+      Op.getValueType() == MVT::f16 && N->getValueType(0) == MVT::f80 &&
+      DAG.getLibcalls().getLibcallImpl(RTLIB::getFPEXT(MVT::f16, MVT::f80)) !=
+          RTLIB::Unsupported;
   if ((Op.getValueType() == MVT::f16 || Op.getValueType() == MVT::bf16) &&
-      N->getValueType(0) != MVT::f32) {
+      N->getValueType(0) != MVT::f32 && !ExtendDirectly) {
     if (IsStrict) {
       Op = DAG.getNode(ISD::STRICT_FP_EXTEND, SDLoc(N),
                        { MVT::f32, MVT::Other }, { Chain, Op });
@@ -1106,6 +1111,8 @@ bool DAGTypeLegalizer::SoftenFloatOperand(SDNode *N, unsigned OpNo) {
   case ISD::STRICT_FP_TO_BF16:
   case ISD::STRICT_FP_ROUND:
   case ISD::FP_ROUND:    Res = SoftenFloatOp_FP_ROUND(N); break;
+  case ISD::STRICT_FP_EXTEND:
+  case ISD::FP_EXTEND:   Res = SoftenFloatOp_FP_EXTEND(N); break;
   case ISD::STRICT_FP_TO_SINT:
   case ISD::STRICT_FP_TO_UINT:
   case ISD::FP_TO_SINT:
@@ -1165,6 +1172,46 @@ SDValue DAGTypeLegalizer::SoftenFloatOp_BITCAST(SDNode *N) {
     return DAG.getZExtOrTrunc(Op0, SDLoc(N), VT);
 
   return DAG.getNode(ISD::BITCAST, SDLoc(N), VT, Op0);
+}
+
+/// Soften an extension of a softened floating-point value to a legal one, such
+/// as x86_fp80 to fp128: the operand is the integer image the value was
+/// softened to, and the helper performs the extension from there.
+SDValue DAGTypeLegalizer::SoftenFloatOp_FP_EXTEND(SDNode *N) {
+  assert(N->getOpcode() == ISD::FP_EXTEND ||
+         N->getOpcode() == ISD::STRICT_FP_EXTEND);
+
+  bool IsStrict = N->isStrictFPOpcode();
+  SDValue Op = N->getOperand(IsStrict ? 1 : 0);
+  EVT SVT = Op.getValueType();
+  EVT RVT = N->getValueType(0);
+
+  RTLIB::Libcall LC = RTLIB::getFPEXT(SVT, RVT);
+  assert(LC != RTLIB::UNKNOWN_LIBCALL && "Unsupported FP_EXTEND libcall");
+
+  SDValue Chain = IsStrict ? N->getOperand(0) : SDValue();
+  RTLIB::LibcallImpl LCImpl = DAG.getLibcalls().getLibcallImpl(LC);
+  if (LCImpl == RTLIB::Unsupported) {
+    reportNoLibcall(DAG, N, SVT);
+    SDValue Poison = DAG.getPOISON(RVT);
+    if (IsStrict) {
+      ReplaceValueWith(SDValue(N, 1), Chain);
+      ReplaceValueWith(SDValue(N, 0), Poison);
+      return SDValue();
+    }
+    return Poison;
+  }
+  Op = GetSoftenedFloat(Op);
+  TargetLowering::MakeLibCallOptions CallOptions;
+  CallOptions.setTypeListBeforeSoften(SVT, RVT);
+  std::pair<SDValue, SDValue> Tmp =
+      TLI.makeLibCall(DAG, LCImpl, RVT, Op, CallOptions, SDLoc(N), Chain);
+  if (IsStrict) {
+    ReplaceValueWith(SDValue(N, 1), Tmp.second);
+    ReplaceValueWith(SDValue(N, 0), Tmp.first);
+    return SDValue();
+  }
+  return Tmp.first;
 }
 
 SDValue DAGTypeLegalizer::SoftenFloatOp_FP_ROUND(SDNode *N) {

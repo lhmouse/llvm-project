@@ -7,10 +7,10 @@
 define void @test_load_store_f80(ptr %p, ptr %q) #0 {
 ; X64-LABEL: test_load_store_f80:
 ; X64:       # %bb.0:
-; X64-NEXT:    movl 8(%rdi), %eax
-; X64-NEXT:    movq (%rdi), %rcx
-; X64-NEXT:    movq %rcx, (%rsi)
-; X64-NEXT:    movw %ax, 8(%rsi)
+; X64-NEXT:    movq (%rdi), %rax
+; X64-NEXT:    movl 8(%rdi), %ecx
+; X64-NEXT:    movl %ecx, 8(%rsi)
+; X64-NEXT:    movq %rax, (%rsi)
 ; X64-NEXT:    retq
 ;
 ; X86-LABEL: test_load_store_f80:
@@ -18,12 +18,12 @@ define void @test_load_store_f80(ptr %p, ptr %q) #0 {
 ; X86-NEXT:    pushl %esi
 ; X86-NEXT:    movl {{[0-9]+}}(%esp), %eax
 ; X86-NEXT:    movl {{[0-9]+}}(%esp), %ecx
-; X86-NEXT:    movl 8(%ecx), %edx
-; X86-NEXT:    movl (%ecx), %esi
-; X86-NEXT:    movl 4(%ecx), %ecx
-; X86-NEXT:    movl %esi, (%eax)
-; X86-NEXT:    movl %ecx, 4(%eax)
-; X86-NEXT:    movw %dx, 8(%eax)
+; X86-NEXT:    movl (%ecx), %edx
+; X86-NEXT:    movl 4(%ecx), %esi
+; X86-NEXT:    movl 8(%ecx), %ecx
+; X86-NEXT:    movl %ecx, 8(%eax)
+; X86-NEXT:    movl %edx, (%eax)
+; X86-NEXT:    movl %esi, 4(%eax)
 ; X86-NEXT:    popl %esi
 ; X86-NEXT:    retl
   %v = load x86_fp80, ptr %p, align 16
@@ -37,10 +37,10 @@ define { x86_fp80, x86_fp80 } @test_struct_ret_f80() #0 {
 ; X64-LABEL: test_struct_ret_f80:
 ; X64:       # %bb.0:
 ; X64-NEXT:    movq %rdi, %rax
-; X64-NEXT:    movl 8, %ecx
-; X64-NEXT:    movq 0, %rdx
-; X64-NEXT:    movq %rdx, (%rdi)
-; X64-NEXT:    movw %cx, 8(%rdi)
+; X64-NEXT:    movq 0, %rcx
+; X64-NEXT:    movl 8, %edx
+; X64-NEXT:    movl %edx, 8(%rdi)
+; X64-NEXT:    movq %rcx, (%rdi)
 ; X64-NEXT:    retq
 ;
 ; X86-LABEL: test_struct_ret_f80:
@@ -52,7 +52,7 @@ define { x86_fp80, x86_fp80 } @test_struct_ret_f80() #0 {
 ; X86-NEXT:    movl 4, %esi
 ; X86-NEXT:    movl %esi, 4(%eax)
 ; X86-NEXT:    movl %edx, (%eax)
-; X86-NEXT:    movw %cx, 8(%eax)
+; X86-NEXT:    movl %ecx, 8(%eax)
 ; X86-NEXT:    popl %esi
 ; X86-NEXT:    retl $4
   %r.real = load x86_fp80, ptr null, align 16
