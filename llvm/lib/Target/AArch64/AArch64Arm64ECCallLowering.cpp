@@ -601,11 +601,15 @@ Function *AArch64Arm64ECCallLowering::buildEntryThunk(Function *F) {
     Thunk->addParamAttr(Thunk->arg_size() - 1, Attribute::InReg);
     Value *StackArgs = Thunk->getArg(Thunk->arg_size() - 1);
 
-    // x4 points at the 32 byte shadow store, so the first stack argument is
-    // 32 bytes further up.  When the hidden return pointer took the first
-    // integer argument register, the x64 caller can only pass three of the
-    // four arguments in registers, and the fourth one, which is the first one
-    // on the stack, fills the last slot of the callee's register save area.
+    // The first stack argument is at X4+0x20. For a non-sret function this is
+    // the 5th argument. But when a function returns a 16-byte structure, in
+    // the x86-64 calling convention it is returned in memory with a hidden
+    // pointer, but in the ARM64EC calling convention it is returned in {X0,X1}
+    // so it does not have a hidden pointer. In this case the x86-64 function
+    // has one more argument, and up to at most three arguments can be passed
+    // in register. Therefore, X4 now points to the 4th argument, but it will
+    // be passed in an integer register to ARM64EC, so load it in there, and
+    // add 8 to X4 so it points to the 5th argument.
     uint64_t StackOffset = 0x20;
     if (TransformDirectToSRet) {
       Args.push_back(IRB.CreateAlignedLoad(
