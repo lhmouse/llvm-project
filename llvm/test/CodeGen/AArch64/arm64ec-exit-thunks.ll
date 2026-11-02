@@ -301,18 +301,18 @@ declare void @has_varargs(...) nounwind;
 ; CHECK-NEXT:     mov     x19, x3
 ; CHECK-NEXT:     mov     x20, x2
 ; CHECK-NEXT:     ldr     x25, [x8, :lo12:__os_arm64x_dispatch_call_no_redirect]
-; CHECK-NEXT:     add     x8, x5, #15
+; CHECK-NEXT:     add     x8, x5, #47
 ; CHECK-NEXT:     mov     x21, x1
 ; CHECK-NEXT:     lsr     x15, x8, #4
 ; CHECK-NEXT:     mov     x22, x0
 ; CHECK-NEXT:     mov     x26, x9
 ; CHECK-NEXT:     bl      "#__chkstk_arm64ec"
-; CHECK-NEXT:     sub     x0, sp, x15, lsl #4
-; CHECK-NEXT:     mov     sp, x0
+; CHECK-NEXT:     sub     x8, sp, x15, lsl #4
+; CHECK-NEXT:     mov     sp, x8
+; CHECK-NEXT:     add     x0, x8, #32
 ; CHECK-NEXT:     mov     x1, x4
 ; CHECK-NEXT:     mov     x2, x5
 ; CHECK-NEXT:     bl      "#memcpy"
-; CHECK-NEXT:     sub     sp, sp, #32
 ; CHECK-NEXT:     fmov    d0, x22
 ; CHECK-NEXT:     fmov    d1, x21
 ; CHECK-NEXT:     mov     x9, x26
@@ -324,7 +324,6 @@ declare void @has_varargs(...) nounwind;
 ; CHECK-NEXT:     mov     x3, x19
 ; CHECK-NEXT:     mov     x16, x25
 ; CHECK-NEXT:     blr     x16
-; CHECK-NEXT:     add     sp, sp, #32
 ; CHECK-NEXT:     .seh_startepilogue
 ; CHECK-NEXT:     sub     sp, x29, #48
 ; CHECK-NEXT:     .seh_add_fp     48
@@ -383,18 +382,18 @@ declare [2 x i8] @has_varargs_small_struct(...) nounwind;
 ; CHECK-NEXT:     mov     x19, x3
 ; CHECK-NEXT:     mov     x20, x2
 ; CHECK-NEXT:     ldr     x25, [x8, :lo12:__os_arm64x_dispatch_call_no_redirect]
-; CHECK-NEXT:     add     x8, x5, #15
+; CHECK-NEXT:     add     x8, x5, #47
 ; CHECK-NEXT:     mov     x21, x1
 ; CHECK-NEXT:     lsr     x15, x8, #4
 ; CHECK-NEXT:     mov     x22, x0
 ; CHECK-NEXT:     mov     x26, x9
 ; CHECK-NEXT:     bl      "#__chkstk_arm64ec"
-; CHECK-NEXT:     sub     x0, sp, x15, lsl #4
-; CHECK-NEXT:     mov     sp, x0
+; CHECK-NEXT:     sub     x8, sp, x15, lsl #4
+; CHECK-NEXT:     mov     sp, x8
+; CHECK-NEXT:     add     x0, x8, #32
 ; CHECK-NEXT:     mov     x1, x4
 ; CHECK-NEXT:     mov     x2, x5
 ; CHECK-NEXT:     bl      "#memcpy"
-; CHECK-NEXT:     sub     sp, sp, #32
 ; CHECK-NEXT:     fmov    d0, x22
 ; CHECK-NEXT:     fmov    d1, x21
 ; CHECK-NEXT:     mov     x9, x26
@@ -406,7 +405,6 @@ declare [2 x i8] @has_varargs_small_struct(...) nounwind;
 ; CHECK-NEXT:     mov     x3, x19
 ; CHECK-NEXT:     mov     x16, x25
 ; CHECK-NEXT:     blr     x16
-; CHECK-NEXT:     add     sp, sp, #32
 ; CHECK-NEXT:     mov     w0, w8
 ; CHECK-NEXT:     sturh   w8, [x29, #-50]
 ; CHECK-NEXT:     ubfx    w1, w8, #8, #8
@@ -562,18 +560,18 @@ declare void @has_varargs_sret(ptr sret([100 x i8]), ...) nounwind;
 ; CHECK-NEXT:     adrp    x8, __os_arm64x_dispatch_call_no_redirect
 ; CHECK-NEXT:     mov     x19, x2
 ; CHECK-NEXT:     ldr     x25, [x8, :lo12:__os_arm64x_dispatch_call_no_redirect]
-; CHECK-NEXT:     add     x8, x4, #15
+; CHECK-NEXT:     add     x8, x4, #47
 ; CHECK-NEXT:     mov     x20, x1
 ; CHECK-NEXT:     lsr     x15, x8, #4
 ; CHECK-NEXT:     mov     x21, x0
 ; CHECK-NEXT:     mov     x26, x9
 ; CHECK-NEXT:     bl      "#__chkstk_arm64ec"
-; CHECK-NEXT:     sub     x0, sp, x15, lsl #4
-; CHECK-NEXT:     mov     sp, x0
+; CHECK-NEXT:     sub     x8, sp, x15, lsl #4
+; CHECK-NEXT:     mov     sp, x8
+; CHECK-NEXT:     add     x0, x8, #32
 ; CHECK-NEXT:     mov     x1, x3
 ; CHECK-NEXT:     mov     x2, x4
 ; CHECK-NEXT:     bl      "#memcpy"
-; CHECK-NEXT:     sub     sp, sp, #32
 ; CHECK-NEXT:     fmov    d0, x22
 ; CHECK-NEXT:     fmov    d1, x21
 ; CHECK-NEXT:     mov     x9, x26
@@ -585,7 +583,6 @@ declare void @has_varargs_sret(ptr sret([100 x i8]), ...) nounwind;
 ; CHECK-NEXT:     mov     x3, x19
 ; CHECK-NEXT:     mov     x16, x25
 ; CHECK-NEXT:     blr     x16
-; CHECK-NEXT:     add     sp, sp, #32
 ; CHECK-NEXT:     .seh_startepilogue
 ; CHECK-NEXT:     sub     sp, x29, #48
 ; CHECK-NEXT:     .seh_add_fp     48
@@ -946,7 +943,9 @@ declare %TSRet @has_varargs_ret_struct16(...) nounwind;
 ; takes the first argument register slot, so the fourth argument register slot
 ; is the first one passed on the stack: the fourth argument goes to [sp, #32]
 ; and the copied variadic arguments start at [sp, #40], matching the x64 stack
-; layout the callee expects.
+; layout the callee expects.  The whole outgoing area is reserved by the
+; dynamic allocation, keeping the copy destination at SP+40 during the memcpy
+; libcall.
 ; CHECK-LABEL:    .def    $iexit_thunk$cdecl$m16$varargs;
 ; CHECK:          .section        .wowthk$aa,"xr",discard,$iexit_thunk$cdecl$m16$varargs
 ; CHECK:          // %bb.0:
@@ -966,19 +965,18 @@ declare %TSRet @has_varargs_ret_struct16(...) nounwind;
 ; CHECK-NEXT:     mov     x19, x3
 ; CHECK-NEXT:     mov     x20, x2
 ; CHECK-NEXT:     ldr     x25, [x8, :lo12:__os_arm64x_dispatch_call_no_redirect]
-; CHECK-NEXT:     add     x8, x5, #15
+; CHECK-NEXT:     add     x8, x5, #55
 ; CHECK-NEXT:     mov     x21, x1
 ; CHECK-NEXT:     lsr     x15, x8, #4
 ; CHECK-NEXT:     mov     x22, x0
 ; CHECK-NEXT:     mov     x26, x9
 ; CHECK-NEXT:     bl      "#__chkstk_arm64ec"
 ; CHECK-NEXT:     sub     x8, sp, x15, lsl #4
-; CHECK-NEXT:     sub     x0, x8, #8
 ; CHECK-NEXT:     mov     sp, x8
+; CHECK-NEXT:     add     x0, x8, #40
 ; CHECK-NEXT:     mov     x1, x4
 ; CHECK-NEXT:     mov     x2, x5
 ; CHECK-NEXT:     bl      "#memcpy"
-; CHECK-NEXT:     sub     sp, sp, #48
 ; CHECK-NEXT:     sub     x8, x29, #64
 ; CHECK-NEXT:     fmov    d1, x22
 ; CHECK-NEXT:     fmov    d2, x21
@@ -992,7 +990,6 @@ declare %TSRet @has_varargs_ret_struct16(...) nounwind;
 ; CHECK-NEXT:     mov     x16, x25
 ; CHECK-NEXT:     str     x19, [sp, #32]
 ; CHECK-NEXT:     blr     x16
-; CHECK-NEXT:     add     sp, sp, #48
 ; CHECK-NEXT:     ldp     x0, x1, [x29, #-64]
 ; CHECK-NEXT:     .seh_startepilogue
 ; CHECK-NEXT:     sub     sp, x29, #48
