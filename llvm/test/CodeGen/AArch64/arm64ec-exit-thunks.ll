@@ -941,6 +941,99 @@ declare void @"??@md5mangleaaaaaaaaaaaaaaaaaaaaaaa@"()
 
 
 
+declare %TSRet @has_varargs_ret_struct16(...) nounwind;
+; The x64 side returns a 16-byte struct through a hidden sret pointer, which
+; takes the first argument register slot, so the fourth argument register slot
+; is the first one passed on the stack: the fourth argument goes to [sp, #32]
+; and the copied variadic arguments start at [sp, #40], matching the x64 stack
+; layout the callee expects.
+; CHECK-LABEL:    .def    $iexit_thunk$cdecl$m16$varargs;
+; CHECK:          .section        .wowthk$aa,"xr",discard,$iexit_thunk$cdecl$m16$varargs
+; CHECK:          // %bb.0:
+; CHECK-NEXT:     stp     x19, x20, [sp, #-64]!           // 16-byte Folded Spill
+; CHECK-NEXT:     .seh_save_regp_x x19, 64
+; CHECK-NEXT:     stp     x21, x22, [sp, #16]             // 16-byte Folded Spill
+; CHECK-NEXT:     .seh_save_regp x21, 16
+; CHECK-NEXT:     stp     x25, x26, [sp, #32]             // 16-byte Folded Spill
+; CHECK-NEXT:     .seh_save_regp x25, 32
+; CHECK-NEXT:     stp     x29, x30, [sp, #48]             // 16-byte Folded Spill
+; CHECK-NEXT:     .seh_save_fplr  48
+; CHECK-NEXT:     add     x29, sp, #48
+; CHECK-NEXT:     .seh_add_fp     48
+; CHECK-NEXT:     .seh_endprologue
+; CHECK-NEXT:     sub     sp, sp, #16
+; CHECK-NEXT:     adrp    x8, __os_arm64x_dispatch_call_no_redirect
+; CHECK-NEXT:     mov     x19, x3
+; CHECK-NEXT:     mov     x20, x2
+; CHECK-NEXT:     ldr     x25, [x8, :lo12:__os_arm64x_dispatch_call_no_redirect]
+; CHECK-NEXT:     add     x8, x5, #15
+; CHECK-NEXT:     mov     x21, x1
+; CHECK-NEXT:     lsr     x15, x8, #4
+; CHECK-NEXT:     mov     x22, x0
+; CHECK-NEXT:     mov     x26, x9
+; CHECK-NEXT:     bl      "#__chkstk_arm64ec"
+; CHECK-NEXT:     sub     x8, sp, x15, lsl #4
+; CHECK-NEXT:     sub     x0, x8, #8
+; CHECK-NEXT:     mov     sp, x8
+; CHECK-NEXT:     mov     x1, x4
+; CHECK-NEXT:     mov     x2, x5
+; CHECK-NEXT:     bl      "#memcpy"
+; CHECK-NEXT:     sub     sp, sp, #48
+; CHECK-NEXT:     sub     x8, x29, #64
+; CHECK-NEXT:     fmov    d1, x22
+; CHECK-NEXT:     fmov    d2, x21
+; CHECK-NEXT:     fmov    d0, x8
+; CHECK-NEXT:     fmov    d3, x20
+; CHECK-NEXT:     sub     x0, x29, #64
+; CHECK-NEXT:     mov     x9, x26
+; CHECK-NEXT:     mov     x1, x22
+; CHECK-NEXT:     mov     x2, x21
+; CHECK-NEXT:     mov     x3, x20
+; CHECK-NEXT:     mov     x16, x25
+; CHECK-NEXT:     str     x19, [sp, #32]
+; CHECK-NEXT:     blr     x16
+; CHECK-NEXT:     add     sp, sp, #48
+; CHECK-NEXT:     ldp     x0, x1, [x29, #-64]
+; CHECK-NEXT:     .seh_startepilogue
+; CHECK-NEXT:     sub     sp, x29, #48
+; CHECK-NEXT:     .seh_add_fp     48
+; CHECK-NEXT:     ldp     x29, x30, [sp, #48]             // 16-byte Folded Reload
+; CHECK-NEXT:     .seh_save_fplr  48
+; CHECK-NEXT:     ldp     x25, x26, [sp, #32]             // 16-byte Folded Reload
+; CHECK-NEXT:     .seh_save_regp x25, 32
+; CHECK-NEXT:     ldp     x21, x22, [sp, #16]             // 16-byte Folded Reload
+; CHECK-NEXT:     .seh_save_regp x21, 16
+; CHECK-NEXT:     ldp     x19, x20, [sp], #64             // 16-byte Folded Reload
+; CHECK-NEXT:     .seh_save_regp_x x19, 64
+; CHECK-NEXT:     .seh_endepilogue
+; CHECK-NEXT:     ret
+; CHECK-NEXT:     .seh_endfunclet
+; CHECK-NEXT:     .seh_endproc
+; CHECK-LABEL:    .def    "#has_varargs_ret_struct16$exit_thunk";
+; CHECK:          .section        .wowthk$aa,"xr",discard,"#has_varargs_ret_struct16$exit_thunk"
+; CHECK:          .weak_anti_dep  has_varargs_ret_struct16
+; CHECK:          .weak_anti_dep  "#has_varargs_ret_struct16"
+; CHECK:          // %bb.0:
+; CHECK-NEXT:     str     x30, [sp, #-16]!                // 8-byte Folded Spill
+; CHECK-NEXT:     .seh_save_reg_x x30, 16
+; CHECK-NEXT:     .seh_endprologue
+; CHECK-NEXT:     adrp    x8, __os_arm64x_check_icall
+; CHECK-NEXT:     adrp    x11, has_varargs_ret_struct16
+; CHECK-NEXT:     add     x11, x11, :lo12:has_varargs_ret_struct16
+; CHECK-NEXT:     ldr     x8, [x8, :lo12:__os_arm64x_check_icall]
+; CHECK-NEXT:     adrp    x10, $iexit_thunk$cdecl$m16$varargs
+; CHECK-NEXT:     add     x10, x10, :lo12:$iexit_thunk$cdecl$m16$varargs
+; CHECK-NEXT:     blr     x8
+; CHECK-NEXT:     .seh_startepilogue
+; CHECK-NEXT:     ldr     x30, [sp], #16                  // 8-byte Folded Reload
+; CHECK-NEXT:     .seh_save_reg_x x30, 16
+; CHECK-NEXT:     .seh_endepilogue
+; CHECK-NEXT:     br      x11
+; CHECK-NEXT:     .seh_endfunclet
+; CHECK-NEXT:     .seh_endproc
+
+
+
 ; CHECK-LABEL:    .section        .hybmp$x,"yi"
 ; CHECK-NEXT:     .symidx "#func_caller"
 ; CHECK-NEXT:     .symidx $ientry_thunk$cdecl$v$v
@@ -1047,6 +1140,12 @@ declare void @"??@md5mangleaaaaaaaaaaaaaaaaaaaaaaa@"()
 ; CHECK-NEXT:     .symidx "??$exit_thunk@md5mangleaaaaaaaaaaaaaaaaaaaaaaa@$$h@"
 ; CHECK-NEXT:     .symidx "??@md5mangleaaaaaaaaaaaaaaaaaaaaaaa@"
 ; CHECK-NEXT:     .word   0
+; CHECK-NEXT:     .symidx has_varargs_ret_struct16
+; CHECK-NEXT:     .symidx $iexit_thunk$cdecl$m16$varargs
+; CHECK-NEXT:     .word   4
+; CHECK-NEXT:     .symidx "#has_varargs_ret_struct16$exit_thunk"
+; CHECK-NEXT:     .symidx has_varargs_ret_struct16
+; CHECK-NEXT:     .word   0
 
 define void @func_caller() nounwind {
   call void @no_op()
@@ -1069,5 +1168,6 @@ define void @func_caller() nounwind {
   call <4 x i8> @small_vector(<4 x i8> <i8 0, i8 0, i8 0, i8 0>)
   call <8 x i16> @large_vector(<8 x i16> <i16 0, i16 0, i16 0, i16 0, i16 0, i16 0, i16 0, i16 0>)
   call void @"??@md5mangleaaaaaaaaaaaaaaaaaaaaaaa@"()
+  call %TSRet (...) @has_varargs_ret_struct16(i64 0, i64 0, i64 0, i64 0)
   ret void
 }

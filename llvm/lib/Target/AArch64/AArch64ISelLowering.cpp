@@ -10705,15 +10705,33 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     Chain = ThunkVarArgDst.getValue(1);
     MFI.CreateVariableSizedObject(Align(16), nullptr);
 
+    // The copied arguments must start right after the outgoing stack arguments
+    // of the call (in the x86-64 layout, the first stack argument follows the
+    // 32-byte shadow store and any argument that occupies one of the four
+    // register slots but was forced to the stack, e.g. when a hidden sret
+    // pointer takes the first slot).  eliminateCallFramePseudoInstr() rounds
+    // the CALLSEQ_START adjustment up to the stack alignment, which pushes
+    // the dynamically allocated block further up than NumBytes, so move the
+    // copy destination down by the amount of that alignment padding.  Note
+    // that the dynamic alloca forces hasVarSizedObjects(), so the call frame
+    // is never reserved and the pseudo is always expanded this way.
+    unsigned AlignmentPadding =
+        alignTo(NumBytes, StackAlign.value()) - NumBytes;
+    if (AlignmentPadding != 0)
+      ThunkVarArgDst =
+          DAG.getNode(ISD::SUB, DL, PtrVT, ThunkVarArgDst,
+                      DAG.getConstant(AlignmentPadding, DL, PtrVT));
+
     // The x64 shadow store for the final thunk call is allocated by the normal
     // CALLSEQ_START below. Copy the variadic stack arguments before that call
     // sequence starts so lowering the memcpy libcall cannot create nested
-    // ADJCALLSTACKDOWN/ADJCALLSTACKUP pairs.
+    // ADJCALLSTACKDOWN/ADJCALLSTACKUP pairs.  Subtracting the alignment
+    // padding above leaves the destination 8-byte aligned in that case.
     Chain = DAG.getMemcpy(
-        Chain, DL, ThunkVarArgDst, ThunkVarArgSrc, ThunkVarArgSize, Align(16),
-        Align(1), /*isVol=*/false, /*AlwaysInline=*/false,
-        /*CI=*/nullptr, std::nullopt, MachinePointerInfo::getUnknownStack(MF),
-        MachinePointerInfo());
+        Chain, DL, ThunkVarArgDst, ThunkVarArgSrc, ThunkVarArgSize,
+        AlignmentPadding ? Align(8) : Align(16), Align(1), /*isVol=*/false,
+        /*AlwaysInline=*/false, /*CI=*/nullptr, std::nullopt,
+        MachinePointerInfo::getUnknownStack(MF), MachinePointerInfo());
   }
 
   // Adjust the stack pointer for the new arguments... and mark ZA uses.

@@ -592,16 +592,28 @@ Function *AArch64Arm64ECCallLowering::buildEntryThunk(Function *F) {
   }
 
   if (F->isVarArg()) {
-    // The 5th argument to variadic entry thunks is used to model the x64 sp
+    // The last argument to variadic entry thunks is used to model the x64 sp
     // which is passed to the thunk in x4, this can be passed to the callee as
     // the variadic argument start address after skipping over the 32 byte
     // shadow store.
 
     // The EC thunk CC will assign any argument marked as InReg to x4.
-    Thunk->addParamAttr(5, Attribute::InReg);
-    Value *Arg = Thunk->getArg(5);
-    Arg = IRB.CreatePtrAdd(Arg, IRB.getInt64(0x20));
-    Args.push_back(Arg);
+    Thunk->addParamAttr(Thunk->arg_size() - 1, Attribute::InReg);
+    Value *StackArgs = Thunk->getArg(Thunk->arg_size() - 1);
+
+    // x4 points at the 32 byte shadow store, so the first stack argument is
+    // 32 bytes further up.  When the hidden return pointer took the first
+    // integer argument register, the x64 caller can only pass three of the
+    // four arguments in registers, and the fourth one, which is the first one
+    // on the stack, fills the last slot of the callee's register save area.
+    uint64_t StackOffset = 0x20;
+    if (TransformDirectToSRet) {
+      Args.push_back(IRB.CreateAlignedLoad(
+          IRB.getInt64Ty(),
+          IRB.CreatePtrAdd(StackArgs, IRB.getInt64(StackOffset)), Align(8)));
+      StackOffset += 8;
+    }
+    Args.push_back(IRB.CreatePtrAdd(StackArgs, IRB.getInt64(StackOffset)));
 
     // Pass in a zero variadic argument size (in x5).
     Args.push_back(IRB.getInt64(0));
