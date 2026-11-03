@@ -10701,16 +10701,16 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
     // outgoing stack area; the 32-byte home slot area for `memcpy` will be
     // reused for the target function. However, there is a special case when
     // the x86-64 function returns a 16-byte structure or int128: The x86-64
-    // ABI requires that the value be returned by memory, so it has a hidden
+    // ABI requires that the value be returned in memory, so it has a hidden
     // pointer, and the 4th argument has to spill to the stack; the ARM64EC
     // function returns the value in {X0,X1} and it doesn't have a hidden
     // pointer. In this case, the x86-64 function has one more argument than
     // the ARM64EC one:
     //
-    //   SP+00 => home for hidden pointer  ; clobbered by `memcpy`
-    //   SP+08 => home for 1st argument    ; clobbered by `memcpy`
-    //   SP+16 => home for 2nd argument    ; clobbered by `memcpy`
-    //   SP+24 => home for 3rd argument    ; clobbered by `memcpy`
+    //   SP+00 => home for hidden pointer  ; clobbered by call to `memcpy`
+    //   SP+08 => home for 1st argument    ; clobbered by call to `memcpy`
+    //   SP+16 => home for 2nd argument    ; clobbered by call to `memcpy`
+    //   SP+24 => home for 3rd argument    ; clobbered by call to `memcpy`
     //   SP+32 => 4th argument             ; !!
     //   SP+40 => 5th argument             ; written by `memcpy`
     //   SP+48 => ...
